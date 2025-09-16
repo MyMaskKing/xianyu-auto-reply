@@ -1,4 +1,3 @@
-
 // ================================
 // 全局变量和配置
 // ================================
@@ -651,9 +650,6 @@ async function loadItemsList(accountId) {
     console.error('加载商品列表时发生错误:', error);
     }
 }
-
-
-
 // 添加或更新关键词
 async function addKeyword() {
     const keyword = document.getElementById('newKeyword').value.trim();
@@ -1416,7 +1412,6 @@ async function refreshRealCookie(cookieId) {
         }
     }
 }
-
 // 显示冷却状态
 async function showCooldownStatus(cookieId) {
     if (!cookieId) {
@@ -2195,7 +2190,6 @@ function toggleReplyContentVisibility() {
     const contentGroup = document.getElementById('editReplyContentGroup');
     contentGroup.style.display = enabled ? 'block' : 'none';
 }
-
 // 保存默认回复设置
 async function saveDefaultReply() {
     try {
@@ -2957,7 +2951,6 @@ async function loadNotificationChannels() {
     showToast('加载通知渠道失败', 'danger');
     }
 }
-
 // 渲染通知渠道列表
 function renderNotificationChannels(channels) {
     const tbody = document.getElementById('channelsTableBody');
@@ -3314,6 +3307,9 @@ function renderMessageNotifications(accounts, notifications) {
             <i class="bi bi-gear"></i> 配置
             </button>
             ${accountNotifications.length > 0 ? `
+            <button class="btn btn-sm btn-outline-success" onclick="testAccountNotification('${accountId}')" title="发送测试通知">
+            <i class="bi bi-send-check"></i>
+            </button>
             <button class="btn btn-sm btn-outline-danger" onclick="deleteAccountNotification('${accountId}')" title="删除配置">
             <i class="bi bi-trash"></i>
             </button>
@@ -3324,6 +3320,29 @@ function renderMessageNotifications(accounts, notifications) {
 
     tbody.appendChild(tr);
     });
+}
+
+// 发送测试通知（对账号所有已启用渠道）
+async function testAccountNotification(accountId) {
+    try {
+        const resp = await fetch(`${apiBase}/notification-channels/test`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${authToken}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ cookie_id: accountId })
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (resp.ok) {
+            showToast(data.message || '测试通知已发送', 'success');
+        } else {
+            showToast(`测试失败: ${data.detail || resp.statusText}`, 'danger');
+        }
+    } catch (err) {
+        console.error('测试通知失败:', err);
+        showToast('测试通知失败', 'danger');
+    }
 }
 
 // 配置账号通知
@@ -3745,7 +3764,6 @@ function initCardImageFileSelector() {
         });
     }
 }
-
 // 验证卡券图片尺寸
 function validateCardImageDimensions(file, inputElement) {
     const img = new Image();
@@ -4505,7 +4523,6 @@ function toggleEditApiParamsHelp() {
         }
     }
 }
-
 // 更新卡券
 async function updateCard() {
     try {
@@ -5294,7 +5311,6 @@ async function reloadSystemCache() {
 // ================================
 // 【商品管理菜单】相关功能
 // ================================
-
 // 切换商品多规格状态
 async function toggleItemMultiSpec(cookieId, itemId, isMultiSpec) {
     try {
@@ -6083,7 +6099,6 @@ function toggleSelectAll(selectAllCheckbox) {
     });
     updateBatchDeleteButton();
 }
-
 // 更新全选状态
 function updateSelectAllState() {
     const checkboxes = document.querySelectorAll('input[name="itemCheckbox"]');
@@ -6882,7 +6897,6 @@ async function showLogStats() {
 }
 
 // ==================== 导入导出功能 ====================
-
 // 导出关键词
 async function exportKeywords() {
     if (!currentCookieId) {
@@ -7677,7 +7691,6 @@ async function exportKeywords() {
 }
 
 // ==================== 备注管理功能 ====================
-
 // 编辑备注
 function editRemark(cookieId, currentRemark) {
     console.log('editRemark called:', cookieId, currentRemark); // 调试信息
@@ -8458,7 +8471,6 @@ async function loadAllOrders() {
         showToast('加载订单数据失败，请检查网络连接', 'danger');
     }
 }
-
 // 根据Cookie加载订单
 async function loadOrdersByCookie() {
     const selectedCookie = document.getElementById('orderCookieFilter').value;
@@ -9240,7 +9252,6 @@ function deleteUser(userId, username) {
     // 显示确认模态框
     deleteUserModal.show();
 }
-
 // 确认删除用户
 async function confirmDeleteUser() {
     if (!currentDeleteUserId) return;
@@ -10026,7 +10037,6 @@ function updateSearchStats(data) {
     document.getElementById('totalDisplayPages').textContent = totalSearchPages;
     document.getElementById('searchResultStats').style.display = 'block';
 }
-
 // 更新搜索分页
 function updateSearchPagination() {
     const paginationContainer = document.getElementById('searchPagination');
@@ -10455,5 +10465,3 @@ async function showUpdateInfo(newVersion) {
     const modal = new bootstrap.Modal(document.getElementById('updateModal'));
     modal.show();
 }
-
-

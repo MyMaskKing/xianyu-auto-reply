@@ -791,6 +791,43 @@ class XianyuLive:
                 ) as response:
                     res_json = await response.json()
 
+                    # 从失败响应中提取滚动条验证URL并尝试自动处理
+                    try:
+                        punish_url = None
+                        if isinstance(res_json, dict):
+                            if res_json.get('data') and isinstance(res_json['data'], dict) and res_json['data'].get('url'):
+                                punish_url = res_json['data']['url']
+                            elif res_json.get('ret'):
+                                for ret_item in res_json['ret']:
+                                    if isinstance(ret_item, str) and ('url=' in ret_item or 'redirect=' in ret_item):
+                                        try:
+                                            url_start = ret_item.find('http')
+                                            url_end = ret_item.find(' ', url_start) if ' ' in ret_item[url_start:] else len(ret_item)
+                                            if url_start >= 0 and url_end > url_start:
+                                                punish_url = ret_item[url_start:url_end].strip()
+                                                break
+                                        except Exception:
+                                            pass
+
+                        if punish_url and ('punish' in punish_url and 'captcha' in punish_url):
+                            logger.warning(f"【{self.cookie_id}】检测到滚动条验证页面URL: {punish_url}")
+                            try:
+                                # 若辅助方法存在则尝试自动处理
+                                if hasattr(self, '_solve_punish_captcha'):
+                                    logger.info(f"【{self.cookie_id}】尝试通过Playwright处理滚动条验证")
+                                    solve_success = await self._solve_punish_captcha(punish_url)
+                                    if solve_success:
+                                        logger.info(f"【{self.cookie_id}】滚动条验证处理完成，重新尝试刷新Token")
+                                        return await self.refresh_token()
+                                    else:
+                                        logger.warning(f"【{self.cookie_id}】滚动条验证未能成功解决")
+                                else:
+                                    logger.warning(f"【{self.cookie_id}】未实现自动处理滚动条验证的方法，需手动处理: {punish_url}")
+                            except Exception as e:
+                                logger.error(f"【{self.cookie_id}】处理滚动条验证页面异常: {self._safe_str(e)}")
+                    except Exception as e:
+                        logger.debug(f"解析验证URL时发生异常: {self._safe_str(e)}")
+
                     # 检查并更新Cookie
                     if 'set-cookie' in response.headers:
                         new_cookies = {}
@@ -867,6 +904,490 @@ class XianyuLive:
             logger.error(f"更新Cookie失败: {self._safe_str(e)}")
             # 发送Cookie更新失败通知
             await self.send_token_refresh_notification(f"Cookie更新失败: {str(e)}", "cookie_update_failed")
+
+    async def _solve_punish_captcha(self, punish_url):
+        """处理包含punish/captcha参数的滚动条验证页面。精简实现，按需引入Playwright。"""
+        logger.info(f"【{self.cookie_id}】正在处理滚动条验证页面: {punish_url}")
+        playwright = None
+        browser = None
+        try:
+            from playwright.async_api import async_playwright
+            import os
+            import os
+            playwright = await async_playwright().start()
+            # 本地可视化：Windows 下（非 Docker）使用有头模式；Docker 内保持无头
+            is_docker = bool(os.getenv('DOCKER_ENV'))
+            headless_mode = True if is_docker else (True if os.name == 'nt' else True)
+            browser = await playwright.chromium.launch(headless=headless_mode, args=[
+                '--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu'
+            ])
+            context = await browser.new_context(
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+                viewport={'width': 1920, 'height': 1080}
+            )
+            # 注入当前Cookie
+            cookies = []
+            for cookie_pair in self.cookies_str.split('; '):
+                if '=' in cookie_pair:
+                    name, value = cookie_pair.split('=', 1)
+                    cookies.append({'name': name.strip(), 'value': value.strip(), 'domain': '.goofish.com', 'path': '/'})
+            if cookies:
+                await context.add_cookies(cookies)
+            page = await context.new_page()
+            # 访问验证页并尝试解决滑块
+            for attempt in range(3):
+                try:
+                    await page.goto(punish_url, wait_until='networkidle', timeout=20000 if attempt == 0 else 30000)
+                    break
+                except Exception as e:
+                    if attempt == 2:
+                        logger.error(f"【{self.cookie_id}】验证页面访问失败: {self._safe_str(e)}")
+                        return False
+                    await asyncio.sleep(1)
+            # 调用滑块解决
+            if hasattr(self, '_detect_and_solve_slider'):
+                solved = await self._detect_and_solve_slider(page)
+                logger.info(f"【{self.cookie_id}】滑动验证执行完成，结果: {'成功' if solved else '失败'}")
+            else:
+                solved = False
+            # 验证成功则同步Cookie
+            if solved:
+                updated_cookies = await context.cookies()
+                new_cookies_dict = {c['name']: c['value'] for c in updated_cookies}
+                self.cookies.update(new_cookies_dict)
+                self.cookies_str = '; '.join([f"{k}={v}" for k, v in self.cookies.items()])
+                await self.update_config_cookies()
+                logger.info(f"【{self.cookie_id}】滚动条验证成功，Cookie已同步")
+                return True
+            logger.warning(f"【{self.cookie_id}】滚动条验证失败")
+            return False
+        except Exception as e:
+            logger.error(f"【{self.cookie_id}】处理滚动条验证异常: {self._safe_str(e)}")
+            return False
+        finally:
+            try:
+                if browser:
+                    await browser.close()
+                if playwright:
+                    await playwright.stop()
+            except Exception:
+                pass
+
+    async def _detect_and_solve_slider(self, page):
+        """检测并尽力处理滑动条验证（阿里云滑块），适配aaa.html结构与无头环境。"""
+        import random
+        # 增强选择器集合
+        slider_selectors = [
+            '#nocaptcha', '#nc_1_n1z', '#nc_1_nocaptcha', '.nc_iconfont.btn_slide', '#nc_1_wrapper .nc_iconfont',
+            '.nc_1_nocaptcha', '.nc-container', '.nc_wrapper', '.nc_scale', '.btn_slide', '.slidetounlock',
+            '.nc_1_n1t', '.nc_1__bg', '#nc_1_wrapper', '#nc_1_scale_text',
+            '.slider-verify', '.verify-slider', '.slider', '#slider', '.drag-slider', '.slide-to-verify',
+            '.slide-btn', '.slide-block', '.slide-handle', '.drag-btn', '.drag-verify', '#drag-button', '#verify-slider',
+            '[class*="tb-pwd-input-wrap"] .nc_wrapper', '[class*="_nc"]', '[class*="_slider"]',
+            '.taobao-captcha-slider', '.xianyu-verify-slider', '.captcha-container',
+            '[class*="slider"]', '[class*="verify"]', '[class*="captcha"]', '[class*="security"]',
+            '[id*="nc_"]', '[id*="slider"]', '[id*="verify"]', '[id*="captcha"]',
+            '.captcha-slider', '.security-slider', '.verify-code-slider'
+        ]
+        container = None
+        for selector in slider_selectors:
+            try:
+                container = await page.query_selector(selector)
+                if container and await container.is_visible():
+                    break
+            except Exception:
+                continue
+        if not container:
+            for selector in slider_selectors:
+                try:
+                    container = await page.wait_for_selector(selector, timeout=2000)
+                    if container and await container.is_visible():
+                        break
+                except Exception:
+                    continue
+        if not container:
+            for selector in ['.slider', '#slider', '.nc_1_nocaptcha', '#nc_1_wrapper', '.nc_wrapper']:
+                try:
+                    container = await page.query_selector(selector)
+                    if container:
+                        break
+                except Exception:
+                    continue
+            if not container:
+                return False
+        logger.info(f"【{self.cookie_id}】检测到滑动验证元素，准备模拟拖动...")
+        handle = None
+        track = None
+        target_context = page  # 用于查询/判断（frame或page），鼠标始终使用page.mouse配合bounding_box坐标
+        for sel in ['#nc_1_n1z', '#nocaptcha .nc_iconfont']:
+            try:
+                handle = await page.query_selector(sel)
+                if handle:
+                    break
+            except Exception:
+                pass
+        if not handle:
+            for sel in ['.nc_iconfont', '.btn_slide', '.slider', '#slider']:
+                try:
+                    handle = await page.query_selector(sel)
+                    if handle:
+                        break
+                except Exception:
+                    pass
+        # 若主页面未找到，尝试在可能的验证码iframe内查找
+        if not handle:
+            try:
+                for frame in page.frames:
+                    url = (frame.url or '').lower()
+                    if ('captcha' in url) or ('punish' in url) or ('alicdn.com' in url) or ('g.alicdn.com' in url):
+                        for sel in ['#nc_1_n1z', '.nc_iconfont.btn_slide', '.slider', '.btn_slide', '#nocaptcha .nc_iconfont']:
+                            elem = await frame.query_selector(sel)
+                            if elem:
+                                handle = elem
+                                target_context = frame
+                                break
+                        if handle:
+                            break
+            except Exception:
+                pass
+        for sel in ['#nc_1_n1t', '#nc_1_wrapper']:
+            try:
+                track = await target_context.query_selector(sel)
+                if track:
+                    break
+            except Exception:
+                pass
+        if not track:
+            for sel in ['.nc_scale', '.nc_1__bg', '.slidetounlock']:
+                try:
+                    track = await target_context.query_selector(sel)
+                    if track:
+                        break
+                except Exception:
+                    pass
+        if not handle or not track:
+            logger.debug(f"【{self.cookie_id}】未找到滑块按钮或轨道，跳过滑动处理")
+            return True
+        box_handle = await handle.bounding_box()
+        box_track = await track.bounding_box()
+        if not box_handle or not box_track:
+            return True
+        distance = max(10, box_track['width'] - box_handle['width'] - 5)
+        success = False
+        max_retries = 5
+        retry_count = 0
+        while retry_count < max_retries and not success:
+            retry_count += 1
+            logger.info(f"【{self.cookie_id}】尝试滑动验证 (第 {retry_count}/{max_retries} 次)")
+            try:
+                # 每次重试前刷新验证页面，确保生成新的验证
+                if retry_count > 1:
+                    try:
+                        await page.reload(wait_until='load', timeout=20000)
+                        await target_context.wait_for_timeout(1200)
+                    except Exception:
+                        pass
+                    # 刷新后重新定位元素与上下文
+                    handle = None
+                    track = None
+                    target_context = page
+                    for sel in ['#nc_1_n1z', '#nocaptcha .nc_iconfont']:
+                        try:
+                            handle = await page.query_selector(sel)
+                            if handle:
+                                break
+                        except Exception:
+                            pass
+                    if not handle:
+                        for sel in ['.nc_iconfont', '.btn_slide', '.slider', '#slider']:
+                            try:
+                                handle = await page.query_selector(sel)
+                                if handle:
+                                    break
+                            except Exception:
+                                pass
+                    if not handle:
+                        try:
+                            for frame in page.frames:
+                                url = (frame.url or '').lower()
+                                if ('captcha' in url) or ('punish' in url) or ('alicdn.com' in url) or ('g.alicdn.com' in url):
+                                    for sel in ['#nc_1_n1z', '.nc_iconfont.btn_slide', '.slider', '.btn_slide', '#nocaptcha .nc_iconfont']:
+                                        elem = await frame.query_selector(sel)
+                                        if elem:
+                                            handle = elem
+                                            target_context = frame
+                                            break
+                                    if handle:
+                                        break
+                        except Exception:
+                            pass
+                    for sel in ['#nc_1_n1t', '#nc_1_wrapper']:
+                        try:
+                            track = await target_context.query_selector(sel)
+                            if track:
+                                break
+                        except Exception:
+                            pass
+                    if not track:
+                        for sel in ['.nc_scale', '.nc_1__bg', '.slidetounlock']:
+                            try:
+                                track = await target_context.query_selector(sel)
+                                if track:
+                                    break
+                            except Exception:
+                                pass
+                    if not handle or not track:
+                        logger.debug(f"【{self.cookie_id}】刷新后未找到滑块或轨道元素，继续重试")
+                        continue
+                    box_handle = await handle.bounding_box()
+                    box_track = await track.bounding_box()
+                    if not box_handle or not box_track:
+                        logger.debug(f"【{self.cookie_id}】刷新后元素无有效位置信息，继续重试")
+                        continue
+                    distance = max(10, box_track['width'] - box_handle['width'] - 5)
+                await target_context.wait_for_timeout(400)
+                start_x = box_handle['x'] + box_handle['width'] / 2
+                start_y = box_handle['y'] + box_handle['height'] / 2
+                # 预热：随机移动与轻点容器，模拟人类探索
+                try:
+                    # 若有容器可点，先激活组件
+                    container_click = await (target_context.query_selector('#nc_1_wrapper') or target_context.query_selector('.nc_wrapper'))
+                    if container_click:
+                        box_c = await container_click.bounding_box()
+                        if box_c:
+                            await page.mouse.move(box_c['x'] + box_c['width']/2, box_c['y'] + box_c['height']/2, steps=3)
+                            await page.mouse.click(box_c['x'] + box_c['width']/2, box_c['y'] + box_c['height']/2)
+                    await page.mouse.move(start_x - 20, start_y + 8, steps=4)
+                    await page.mouse.move(start_x + 12, start_y - 6, steps=3)
+                    await page.mouse.move(start_x, start_y, steps=2)
+                except Exception:
+                    pass
+                await target_context.wait_for_timeout(120)
+                await page.mouse.down()
+                await target_context.wait_for_timeout(120)
+
+                # 生成更贴近人类的滑动轨迹（ease-in-out + 抖动 + 轻微超调回拉）
+                def _generate_human_tracks(total_distance):
+                    tracks = []  # (dx, dy, delay_ms)
+                    current = 0.0
+                    steps = random.randint(28, 46)
+                    for i in range(steps):
+                        t = i / steps
+                        ease = 3 * t * t - 2 * t * t * t
+                        target = total_distance * ease
+                        move = max(0.0, target - current)
+                        move += random.uniform(-0.9, 1.1)
+                        if current + move > total_distance:
+                            move = total_distance - current
+                        current += move
+                        jitter_y = random.uniform(-1.8, 1.8)
+                        delay_ms = random.uniform(8, 22)
+                        tracks.append((move, jitter_y, delay_ms))
+                    # 轻微超调再回拉
+                    overshoot = random.uniform(2, 6)
+                    tracks.append((overshoot, random.uniform(-1, 1), random.uniform(12, 22)))
+                    tracks.append((-overshoot + random.uniform(-1, 1), random.uniform(-1, 1), random.uniform(12, 22)))
+                    return tracks
+
+                _tracks = _generate_human_tracks(distance)
+                cur_x = start_x
+                for dx, dy, delay_ms in _tracks:
+                    cur_x += dx
+                    await page.mouse.move(cur_x, start_y + dy, steps=2)
+                    await target_context.wait_for_timeout(int(delay_ms))
+
+                # 末尾停顿再松开
+                await target_context.wait_for_timeout(180)
+                await page.mouse.up()
+                await target_context.wait_for_timeout(600)
+                success = False
+                # 打印一次关键节点信息，辅助诊断
+                try:
+                    pos_info = await target_context.evaluate('''() => {
+                        const slider = document.getElementById('nc_1_n1z') || document.querySelector('.nc_iconfont.btn_slide') || document.querySelector('.slider');
+                        return slider ? (slider.style.left || (slider.getAttribute('style')||'')) : ''
+                    }''')
+                    logger.debug(f"【{self.cookie_id}】滑块left样式: {pos_info}")
+                except Exception:
+                    pass
+                success_selectors = [
+                    '.nc-lang-cnt[data-nc-lang="SUCCESS"]', '.success', '.nc_iconfont.btn_ok', '#nc_1__scale_text > span.success', '.tips_success'
+                ]
+                for s in success_selectors:
+                    try:
+                        await target_context.wait_for_selector(s, timeout=1000)
+                        success = True
+                        break
+                    except Exception:
+                        pass
+                if not success:
+                    try:
+                        verification_result = await target_context.evaluate('''() => {
+                            const slider = document.getElementById('nc_1_n1z');
+                            const sliderPosition = slider ? parseFloat(slider.style.left)||0 : 0;
+                            const container = document.getElementById('nocaptcha') || document.querySelector('.nc-container');
+                            const containerClass = container ? container.className : '';
+                            const tips = document.querySelector('.nc-lang-cnt') || document.querySelector('.slide-tips');
+                            const tipText = tips ? (tips.innerText||'') : '';
+                            const overlay = document.querySelector('.nc_mask');
+                            const overlayDisappeared = !overlay || window.getComputedStyle(overlay).display === 'none';
+                            const hasSuccessClass = containerClass.includes('success') || containerClass.includes('ok');
+                            const hasSuccessText = tipText.includes('成功') || tipText.includes('验证通过');
+                            return { sliderPosition, hasSuccessClass, hasSuccessText, overlayDisappeared,
+                                isSuccess: hasSuccessClass || hasSuccessText || (sliderPosition>0 && overlayDisappeared) };
+                        }''')
+                        if verification_result.get('isSuccess', False):
+                            success = True
+                        elif verification_result.get('sliderPosition', 0) > distance * 0.9:
+                            success = True
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            if not success and retry_count < max_retries:
+                # 失败后尝试点击框体或刷新按钮以触发“重试”
+                try:
+                    # 优先点击显式的重试/刷新按钮
+                    click_selectors = [
+                        '.nc_refresh', '.nc-iconfont.nc-refresh', '.nc_btn_1',
+                        '#nocaptcha', '#nc_1_wrapper', '.nc_wrapper', '.nc-lang-cnt'
+                    ]
+                    clicked = False
+                    for sel in click_selectors:
+                        try:
+                            el = await target_context.query_selector(sel)
+                            if el and await el.is_visible():
+                                box_r = await el.bounding_box()
+                                if box_r:
+                                    await page.mouse.move(box_r['x'] + box_r['width']/2, box_r['y'] + box_r['height']/2, steps=2)
+                                    await page.mouse.click(box_r['x'] + box_r['width']/2, box_r['y'] + box_r['height']/2)
+                                    clicked = True
+                                    logger.debug(f"【{self.cookie_id}】点击了重试/刷新元素: {sel}")
+                                    break
+                        except Exception:
+                            continue
+                    if not clicked:
+                        # 兜底：点击滑块区域附近
+                        try:
+                            await page.mouse.move(start_x, start_y, steps=2)
+                            await page.mouse.click(start_x, start_y)
+                            logger.debug(f"【{self.cookie_id}】点击滑块区域触发重试")
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                await asyncio.sleep(1)
+        await asyncio.sleep(1)
+        return success
+
+    async def _get_h5api_cookies_directly(self):
+        """访问闲鱼消息页并监听h5api请求以刷新Cookie。"""
+        logger.info(f"【{self.cookie_id}】尝试通过访问咸鱼消息页面获取h5api Cookie...")
+        playwright = None
+        browser = None
+        try:
+            from playwright.async_api import async_playwright
+            playwright = await async_playwright().start()
+            is_docker = bool(os.getenv('DOCKER_ENV'))
+            headless_mode = True if is_docker else (False if os.name == 'nt' else True)
+            browser = await playwright.chromium.launch(headless=headless_mode, args=[
+                '--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu'
+            ])
+            context = await browser.new_context(
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+                viewport={'width': 1920, 'height': 1080}
+            )
+            cookies = []
+            for cookie_pair in self.cookies_str.split('; '):
+                if '=' in cookie_pair:
+                    name, value = cookie_pair.split('=', 1)
+                    cookies.append({'name': name.strip(), 'value': value.strip(), 'domain': '.goofish.com', 'path': '/'})
+            if cookies:
+                await context.add_cookies(cookies)
+            page = await context.new_page()
+            target_url = "https://www.goofish.com/im?spm=a21ybx.home.sidebar.1.4c053da6vYwnmf"
+            try:
+                await page.goto(target_url, wait_until='domcontentloaded', timeout=15000)
+            except Exception as e:
+                try:
+                    await page.goto(target_url, wait_until='load', timeout=20000)
+                except Exception:
+                    await page.goto(target_url, timeout=25000)
+            try:
+                await self._detect_and_solve_slider(page)
+            except Exception:
+                pass
+            logger.info(f"【{self.cookie_id}】等待捕获h5api接口响应...")
+            h5api_responses = []
+            async def capture_h5api_responses():
+                nonlocal h5api_responses
+                async def response_listener():
+                    while True:
+                        try:
+                            response = await page.wait_for_response(lambda r: r.url.startswith('https://h5api.m.goofish.com/h5/') and r.status == 200, timeout=3000)
+                            if response and response.url not in [r.url for r in h5api_responses]:
+                                h5api_responses.append(response)
+                                if len(h5api_responses) >= 3:
+                                    break
+                        except Exception:
+                            break
+                listener_task = asyncio.create_task(response_listener())
+                await asyncio.sleep(10)
+                listener_task.cancel()
+            await page.evaluate("window.scrollTo(0, 100)")
+            await asyncio.sleep(1)
+            await capture_h5api_responses()
+            if not h5api_responses:
+                await self._trigger_additional_interactions(page)
+                await asyncio.sleep(2)
+            try:
+                await page.reload(wait_until='domcontentloaded', timeout=12000)
+                await asyncio.sleep(1)
+            except Exception:
+                try:
+                    await page.reload(wait_until='load', timeout=15000)
+                except Exception:
+                    pass
+            updated_cookies = await context.cookies()
+            new_cookies_dict = {cookie['name']: cookie['value'] for cookie in updated_cookies}
+            self.cookies.update(new_cookies_dict)
+            self.cookies_str = '; '.join([f"{k}={v}" for k, v in self.cookies.items()])
+            await self.update_config_cookies()
+            return True
+        except Exception as e:
+            logger.error(f"【{self.cookie_id}】获取h5api Cookie失败: {self._safe_str(e)}")
+            return False
+        finally:
+            try:
+                if browser:
+                    await browser.close()
+                if playwright:
+                    await playwright.stop()
+            except Exception:
+                pass
+
+    async def _trigger_additional_interactions(self, page):
+        """主动触发页面交互以推动Cookie刷新。"""
+        try:
+            interactions = [
+                "window.scrollTo(0, window.innerHeight * 0.3)",
+                "document.dispatchEvent(new MouseEvent('mousemove', {clientX: 100, clientY: 100}))",
+                "document.body.click()",
+                "window.scrollTo(0, window.innerHeight * 0.7)",
+                "document.dispatchEvent(new MouseEvent('mousemove', {clientX: 300, clientY: 200}))",
+                "document.dispatchEvent(new MouseEvent('mousedown', {clientX: 300, clientY: 200}))",
+                "document.dispatchEvent(new MouseEvent('mouseup', {clientX: 300, clientY: 200}))",
+                "window.scrollTo(0, document.body.scrollHeight)",
+                "window.scrollTo(0, 0)"
+            ]
+            for interaction in interactions:
+                try:
+                    await page.evaluate(interaction)
+                    await asyncio.sleep(0.5)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.error(f"【{self.cookie_id}】执行主动交互时出错: {self._safe_str(e)}")
 
     async def _restart_instance(self):
         """重启XianyuLive实例"""

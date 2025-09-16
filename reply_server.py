@@ -1063,6 +1063,11 @@ class NotificationChannelUpdate(BaseModel):
     enabled: bool = True
 
 
+class NotificationTestIn(BaseModel):
+    cookie_id: str
+    channel_id: Optional[int] = None
+
+
 class MessageNotificationIn(BaseModel):
     channel_id: int
     enabled: bool = True
@@ -1855,6 +1860,92 @@ def delete_message_notification(notification_id: int, _: None = Depends(require_
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ------------------------- 通知测试接口 -------------------------
+@app.post('/notification-channels/test')
+async def test_notification_channel(test_in: NotificationTestIn, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """发送一条测试通知到指定账号的通知渠道。
+
+    - 如果提供 channel_id，则仅向该渠道测试发送
+    - 否则，向该账号已启用的所有渠道发送测试通知
+    """
+    from db_manager import db_manager
+    import asyncio
+
+    try:
+        # 权限校验：cookie是否属于当前登录用户
+        user_id = current_user['user_id']
+        user_cookies = db_manager.get_all_cookies(user_id)
+        if test_in.cookie_id not in user_cookies:
+            raise HTTPException(status_code=403, detail='无权限操作该账号')
+
+        # 准备通知内容
+        test_message = (
+            f"🚨 通知渠道测试\n\n"
+            f"账号: {test_in.cookie_id}\n"
+            f"时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"这是一次由后台触发的测试消息，用于验证通知渠道配置是否有效。"
+        )
+
+        # 找到对应的运行实例
+        from cookie_manager import manager as cookie_manager
+        if cookie_manager is None:
+            raise HTTPException(status_code=500, detail='系统未初始化完成')
+
+        # 检索实例任务并创建临时 XianyuLive 用于复用发送逻辑
+        # 直接构造一个轻量实例只用于发送通知，避免影响主循环
+        from XianyuAutoAsync import XianyuLive
+        live = XianyuLive(
+            cookies_str=user_cookies[test_in.cookie_id],
+            cookie_id=test_in.cookie_id,
+            user_id=user_id
+        )
+
+        # 如果指定了单个渠道，临时过滤仅该渠道
+        if test_in.channel_id is not None:
+            notifications = db_manager.get_account_notifications(test_in.cookie_id)
+            notifications = [n for n in notifications if n['channel_id'] == test_in.channel_id and n.get('enabled', True)]
+            if not notifications:
+                raise HTTPException(status_code=404, detail='指定的渠道不存在或未启用')
+
+            # 构建最小化的 send_notification 过程（复用私有方法）
+            # 直接调用私有发送函数以避免真实买家字段依赖
+            for n in notifications:
+                cfg = live._parse_notification_config(n.get('channel_config'))
+                t = n.get('channel_type')
+                if t == 'qq':
+                    await live._send_qq_notification(cfg, test_message)
+                elif t in ('ding_talk', 'dingtalk'):
+                    await live._send_dingtalk_notification(cfg, test_message)
+                elif t in ('feishu', 'lark'):
+                    await live._send_feishu_notification(cfg, test_message)
+                elif t == 'bark':
+                    await live._send_bark_notification(cfg, test_message)
+                elif t == 'email':
+                    await live._send_email_notification(cfg, test_message)
+                elif t == 'webhook':
+                    await live._send_webhook_notification(cfg, test_message)
+                elif t == 'wechat':
+                    await live._send_wechat_notification(cfg, test_message)
+                elif t == 'telegram':
+                    await live._send_telegram_notification(cfg, test_message)
+                else:
+                    logger.warning(f"不支持的通知渠道类型: {t}")
+        else:
+            # 未指定 channel_id，则复用现有公共发送逻辑，对账号已启用的所有渠道群发
+            await live.send_notification(
+                send_user_name='通知测试',
+                send_user_id='0',
+                send_message='这是一条测试通知（来自管理后台）',
+                item_id=None,
+                chat_id=None
+            )
+
+        return { 'success': True, 'message': '测试通知已发送' }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"通知测试失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 # ------------------------- 系统设置接口 -------------------------
 
 @app.get('/system-settings')
