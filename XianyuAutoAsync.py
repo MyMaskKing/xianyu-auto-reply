@@ -820,6 +820,10 @@ class XianyuLive:
                                 self.last_token_refresh_time = time.time()
 
                                 logger.info(f"【{self.cookie_id}】Token刷新成功")
+                                
+                                # Token刷新成功后，重启实例以使用新的token
+                                await self._restart_instance()
+                                
                                 return new_token
 
                     logger.error(f"【{self.cookie_id}】Token刷新失败: {res_json}")
@@ -836,6 +840,7 @@ class XianyuLive:
                         
                         logger.info(f"【{self.cookie_id}】Token刷新失败，尝试通过浏览器刷新Cookie")
                         refresh_success = await self._refresh_cookies_via_browser()
+                        logger.info(f"【{self.cookie_id}】_refresh_cookies_via_browser返回结果: {refresh_success}")
                         if refresh_success:
                             logger.info(f"【{self.cookie_id}】Cookie刷新成功，重新尝试获取Token")
                             # 递归调用refresh_token，使用新的Cookie
@@ -859,6 +864,7 @@ class XianyuLive:
             try:
                 logger.info(f"【{self.cookie_id}】Token刷新异常，尝试通过浏览器刷新Cookie")
                 refresh_success = await self._refresh_cookies_via_browser()
+                logger.info(f"【{self.cookie_id}】_refresh_cookies_via_browser返回结果: {refresh_success}")
                 if refresh_success:
                     logger.info(f"【{self.cookie_id}】Cookie刷新成功，重新尝试获取Token")
                     # 递归调用refresh_token，使用新的Cookie
@@ -5385,6 +5391,7 @@ class XianyuLive:
             await self.update_config_cookies()
 
             logger.info(f"【{self.cookie_id}】Cookie刷新完成")
+            logger.info(f"【{self.cookie_id}】准备返回True，表示Cookie刷新成功")
             return True
 
         except Exception as e:
