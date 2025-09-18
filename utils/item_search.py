@@ -12,6 +12,7 @@ import os
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 from loguru import logger
+from config import BROWSER_HEADLESS
 
 # 修复Docker环境中的asyncio事件循环策略问题
 if sys.platform.startswith('linux') or os.getenv('DOCKER_ENV'):
@@ -136,7 +137,7 @@ class XianyuSearcher:
 
             logger.info("正在启动浏览器...")
             self.browser = await playwright.chromium.launch(
-                headless=True,  # 无头模式，后台运行
+                headless=BROWSER_HEADLESS ,  # 无头模式，后台运行
                 args=browser_args
             )
 

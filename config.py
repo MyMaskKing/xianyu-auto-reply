@@ -112,6 +112,11 @@ AUTO_REPLY = config.get('AUTO_REPLY', {
 })
 MANUAL_MODE = config.get('MANUAL_MODE', {})
 LOG_CONFIG = config.get('LOG_CONFIG', {}) 
+# 浏览器无头模式设置，优先从环境变量获取，然后从配置文件获取
+BROWSER_HEADLESS = os.getenv('BROWSER_HEADLESS', config.get('BROWSER_HEADLESS', True))
+
+# Docker环境设置，优先从环境变量获取，然后从配置文件获取
+DOCKER_ENV = os.getenv('DOCKER_ENV', config.get('DOCKER_ENV', False))
 _cookies_raw = config.get('COOKIES', [])
 if isinstance(_cookies_raw, list):
     COOKIES_LIST = _cookies_raw
