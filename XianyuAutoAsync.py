@@ -5401,9 +5401,26 @@ class XianyuLive:
             # 确保资源清理
             try:
                 if browser:
-                    await browser.close()
+                    logger.info(f"【{self.cookie_id}】开始清理浏览器资源...")
+                    try:
+                        await asyncio.wait_for(browser.close(), timeout=10.0)
+                        logger.info(f"【{self.cookie_id}】浏览器资源清理完成")
+                    except asyncio.TimeoutError:
+                        logger.warning(f"【{self.cookie_id}】浏览器关闭超时，强制清理")
+                    except Exception as browser_e:
+                        logger.warning(f"【{self.cookie_id}】浏览器关闭时出错: {self._safe_str(browser_e)}")
+                
                 if playwright:
-                    await playwright.stop()
+                    logger.info(f"【{self.cookie_id}】开始清理Playwright资源...")
+                    try:
+                        await asyncio.wait_for(playwright.stop(), timeout=10.0)
+                        logger.info(f"【{self.cookie_id}】Playwright资源清理完成")
+                    except asyncio.TimeoutError:
+                        logger.warning(f"【{self.cookie_id}】Playwright停止超时，强制清理")
+                    except Exception as playwright_e:
+                        logger.warning(f"【{self.cookie_id}】Playwright停止时出错: {self._safe_str(playwright_e)}")
+                        
+                logger.info(f"【{self.cookie_id}】所有资源清理完成")
             except Exception as cleanup_e:
                 logger.warning(f"【{self.cookie_id}】清理浏览器资源时出错: {self._safe_str(cleanup_e)}")
 
