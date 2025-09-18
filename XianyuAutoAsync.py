@@ -1524,30 +1524,47 @@ class XianyuLive:
             # 增加等待时间，确保滚动条验证完全加载
             await asyncio.sleep(3)
             logger.info(f"【{self.cookie_id}】开始第二轮检测...")
-            for i, selector in enumerate(slider_selectors):
-                try:
-                    container = await page.wait_for_selector(selector, timeout=3000)
-                    if container and await container.is_visible():
-                        found_selector = selector
-                        logger.info(f"【{self.cookie_id}】✓ 第二轮找到滚动条验证组件: {selector}")
+
+            # 第二轮采用整体时间预算+非阻塞查询，避免长时间卡住
+            try:
+                import time as _t
+                start_ts = _t.monotonic()
+                budget_seconds = 6.0
+                for i, selector in enumerate(slider_selectors):
+                    if _t.monotonic() - start_ts > budget_seconds:
+                        logger.info(f"【{self.cookie_id}】第二轮检测达到{budget_seconds}s预算，提前结束")
                         break
-                    else:
-                        logger.debug(f"【{self.cookie_id}】第二轮选择器 {i+1}/{len(slider_selectors)}: {selector} - 未找到或不可见")
-                except Exception as e:
-                    logger.debug(f"【{self.cookie_id}】第二轮选择器 {i+1}/{len(slider_selectors)}: {selector} - 检测异常: {self._safe_str(e)}")
-                    continue
+                    try:
+                        candidate = await page.query_selector(selector)
+                        if candidate and await candidate.is_visible():
+                            container = candidate
+                            found_selector = selector
+                            logger.info(f"【{self.cookie_id}】✓ 第二轮检测命中: {selector}")
+                            break
+                        else:
+                            logger.debug(f"【{self.cookie_id}】第二轮 {i+1}/{len(slider_selectors)}: {selector} - 未找到或不可见")
+                    except Exception as e:
+                        logger.debug(f"【{self.cookie_id}】第二轮 {i+1}/{len(slider_selectors)}: {selector} - 检测异常: {self._safe_str(e)}")
+                        continue
+                    try:
+                        await asyncio.sleep(0.05)
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.debug(f"【{self.cookie_id}】第二轮检测流程异常: {self._safe_str(e)}")
         if not container:
             logger.info(f"【{self.cookie_id}】第二轮检测仍未找到，尝试最后几个关键选择器...")
-            for selector in ['.slider', '#slider', '.nc_1_nocaptcha', '#nc_1_wrapper', '.nc_wrapper']:
-                try:
-                    container = await page.query_selector(selector)
-                    if container:
+            fallback_selectors = ['.slider', '#slider', '.nc_1_nocaptcha', '#nc_1_wrapper', '.nc_wrapper']
+            try:
+                for selector in fallback_selectors:
+                    candidate = await page.query_selector(selector)
+                    if candidate and await candidate.is_visible():
+                        container = candidate
                         found_selector = selector
-                        logger.info(f"【{self.cookie_id}】✓ 最后尝试找到滚动条验证组件: {selector}")
+                        logger.info(f"【{self.cookie_id}】✓ 最后尝试命中: {selector}")
                         break
-                except Exception as e:
-                    logger.debug(f"【{self.cookie_id}】最后尝试选择器 {selector} - 检测异常: {self._safe_str(e)}")
-                    continue
+            except Exception as e:
+                logger.debug(f"【{self.cookie_id}】关键选择器检测异常: {self._safe_str(e)}")
         
         if not container:
             logger.warning(f"【{self.cookie_id}】✗ 未检测到任何滚动条验证组件，可能页面没有验证或验证已过期")
@@ -5299,14 +5316,6 @@ class XianyuLive:
                 else:
                     raise e
             
-            # 检测并处理第一次刷新后的验证
-            try:
-                logger.info(f"【{self.cookie_id}】检测第一次刷新后的验证...")
-                await self._handle_all_verifications(page)
-                logger.info(f"【{self.cookie_id}】第一次刷新后验证处理完成")
-            except Exception as se:
-                logger.debug(f"【{self.cookie_id}】第一次刷新后验证处理异常: {self._safe_str(se)}")
-            
             await asyncio.sleep(2)  # 增加等待时间
 
             # 第二次刷新 - 带重试机制
@@ -5321,16 +5330,6 @@ class XianyuLive:
                     logger.info(f"【{self.cookie_id}】第二次刷新成功（降级策略）")
                 else:
                     raise e
-            
-            # 检测并处理第二次刷新后的验证
-            try:
-                logger.info(f"【{self.cookie_id}】检测第二次刷新后的验证...")
-                await self._handle_all_verifications(page)
-                logger.info(f"【{self.cookie_id}】第二次刷新后验证处理完成")
-            except Exception as se:
-                logger.debug(f"【{self.cookie_id}】第二次刷新后验证处理异常: {self._safe_str(se)}")
-            
-            await asyncio.sleep(2)  # 增加等待时间，确保所有验证完成
 
             # Cookie刷新模式：正常更新Cookie
             logger.info(f"【{self.cookie_id}】获取更新后的Cookie...")
