@@ -1051,30 +1051,58 @@ class XianyuLive:
             iframe_count = 0
             for frame in page.frames:
                 f_url = (frame.url or '').lower()
-                # 仅检查可能包含验证或弹窗的iframe
-                if any(keyword in f_url for keyword in ['punish', 'captcha', 'alicdn.com', 'goofish.com', 'taobao.com']):
-                    iframe_count += 1
-                    logger.info(f"【{self.cookie_id}】在iframe {iframe_count} ({f_url}) 中查找'{popup_type}'按钮...")
+                iframe_count += 1
+                logger.info(f"【{self.cookie_id}】在iframe {iframe_count} ({f_url}) 中查找'{popup_type}'按钮...")
+                
+                # 等待iframe加载完成
+                try:
+                    await frame.wait_for_load_state('networkidle', timeout=5000)
+                except Exception:
+                    pass  # 忽略超时错误
+                
+                for i, selector in enumerate(selectors):
+                    try:
+                        button = await frame.query_selector(selector)
+                        if button and await button.is_visible():
+                            await button.click()
+                            found_selector = selector
+                            logger.info(f"【{self.cookie_id}】✓ 成功点击iframe ({f_url}) 中的'{popup_type}'按钮: {selector}")
+                            clicked = True
+                            break
+                        else:
+                            logger.debug(f"【{self.cookie_id}】iframe选择器 {i+1}/{len(selectors)}: {selector} - 未找到或不可见")
+                    except Exception as e:
+                        logger.debug(f"【{self.cookie_id}】iframe选择器 {i+1}/{len(selectors)}: {selector} - 查找失败: {self._safe_str(e)}")
+                        continue
+                
+                if clicked:
+                    break
+            
+            if not clicked:
+                logger.info(f"【{self.cookie_id}】在 {iframe_count} 个iframe中均未找到'{popup_type}'按钮")
+                
+                # 如果没有找到，等待一段时间后重试
+                logger.info(f"【{self.cookie_id}】等待2秒后重试查找'{popup_type}'按钮...")
+                await asyncio.sleep(2)
+                
+                for frame in page.frames:
+                    f_url = (frame.url or '').lower()
+                    logger.info(f"【{self.cookie_id}】重试在iframe ({f_url}) 中查找'{popup_type}'按钮...")
+                    
                     for i, selector in enumerate(selectors):
                         try:
                             button = await frame.query_selector(selector)
                             if button and await button.is_visible():
                                 await button.click()
                                 found_selector = selector
-                                logger.info(f"【{self.cookie_id}】✓ 成功点击iframe ({f_url}) 中的'{popup_type}'按钮: {selector}")
+                                logger.info(f"【{self.cookie_id}】✓ 重试后成功点击iframe中的'{popup_type}'按钮: {selector}")
                                 clicked = True
                                 break
-                            else:
-                                logger.debug(f"【{self.cookie_id}】iframe选择器 {i+1}/{len(selectors)}: {selector} - 未找到或不可见")
                         except Exception as e:
-                            logger.debug(f"【{self.cookie_id}】iframe选择器 {i+1}/{len(selectors)}: {selector} - 查找失败: {self._safe_str(e)}")
-                if clicked:
-                    break
-            
-            if iframe_count == 0:
-                logger.info(f"【{self.cookie_id}】未找到相关的iframe进行查找")
-            elif not clicked:
-                logger.info(f"【{self.cookie_id}】在 {iframe_count} 个iframe中均未找到'{popup_type}'按钮")
+                            continue
+                    
+                    if clicked:
+                        break
         
         if clicked:
             # 等待弹窗或遮罩消失
