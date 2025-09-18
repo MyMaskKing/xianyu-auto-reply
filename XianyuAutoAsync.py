@@ -178,6 +178,8 @@ class XianyuLive:
         # Token刷新相关配置
         self.token_refresh_interval = TOKEN_REFRESH_INTERVAL
         self.token_retry_interval = TOKEN_RETRY_INTERVAL
+        self.refresh_token_browser_retry = 0  # 通过浏览器刷新Cookie以修复token失败的重试计数
+        self.refresh_token_browser_retry_limit = 3  # 最多尝试3次
         self.last_token_refresh_time = 0
         self.current_token = None
         self.token_refresh_task = None
@@ -836,11 +838,19 @@ class XianyuLive:
                             self.verification_url = res_json['data']['url']
                             logger.info(f"【{self.cookie_id}】保存验证URL到类变量: {self.verification_url}")
                         
-                        logger.info(f"【{self.cookie_id}】Token刷新失败，尝试通过浏览器刷新Cookie")
+                        # 控制通过浏览器刷新Cookie的重试次数
+                        if self.refresh_token_browser_retry >= self.refresh_token_browser_retry_limit:
+                            logger.error(f"【{self.cookie_id}】通过浏览器刷新Cookie已达到上限({self.refresh_token_browser_retry_limit})，停止重试")
+                            await self.send_token_refresh_notification("Token刷新失败且达到浏览器刷新上限，已停止重试", "token_refresh_exhausted")
+                            return None
+
+                        self.refresh_token_browser_retry += 1
+                        logger.info(f"【{self.cookie_id}】Token刷新失败，尝试通过浏览器刷新Cookie (第{self.refresh_token_browser_retry}/{self.refresh_token_browser_retry_limit}次)")
                         refresh_success = await self._refresh_cookies_via_browser()
                         logger.info(f"【{self.cookie_id}】_refresh_cookies_via_browser返回结果: {refresh_success}")
                         if refresh_success:
-                            logger.info(f"【{self.cookie_id}】Cookie刷新成功，重新尝试获取Token")
+                            logger.info(f"【{self.cookie_id}】Cookie刷新成功，重置重试计数并重新尝试获取Token")
+                            self.refresh_token_browser_retry = 0
                             # 递归调用refresh_token，使用新的Cookie
                             return await self.refresh_token()
                         else:
@@ -860,11 +870,18 @@ class XianyuLive:
 
             # 尝试通过浏览器刷新Cookie来解决问题
             try:
-                logger.info(f"【{self.cookie_id}】Token刷新异常，尝试通过浏览器刷新Cookie")
+                if self.refresh_token_browser_retry >= self.refresh_token_browser_retry_limit:
+                    logger.error(f"【{self.cookie_id}】通过浏览器刷新Cookie已达到上限({self.refresh_token_browser_retry_limit})，停止重试")
+                    await self.send_token_refresh_notification("Token刷新异常且达到浏览器刷新上限，已停止重试", "token_refresh_exhausted")
+                    return None
+
+                self.refresh_token_browser_retry += 1
+                logger.info(f"【{self.cookie_id}】Token刷新异常，尝试通过浏览器刷新Cookie (第{self.refresh_token_browser_retry}/{self.refresh_token_browser_retry_limit}次)")
                 refresh_success = await self._refresh_cookies_via_browser()
                 logger.info(f"【{self.cookie_id}】_refresh_cookies_via_browser返回结果: {refresh_success}")
                 if refresh_success:
-                    logger.info(f"【{self.cookie_id}】Cookie刷新成功，重新尝试获取Token")
+                    logger.info(f"【{self.cookie_id}】Cookie刷新成功，重置重试计数并重新尝试获取Token")
+                    self.refresh_token_browser_retry = 0
                     # 递归调用refresh_token，使用新的Cookie
                     return await self.refresh_token()
                 else:
