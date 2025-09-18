@@ -820,10 +820,8 @@ class XianyuLive:
                                 self.last_token_refresh_time = time.time()
 
                                 logger.info(f"【{self.cookie_id}】Token刷新成功")
-                                
-                                # Token刷新成功后，重启实例以使用新的token
-                                await self._restart_instance()
-                                
+                                # 不在此处重启实例，避免主循环与重启产生竞态导致循环重启
+                                # 由 token_refresh_loop 设置标志并关闭 ws 触发主循环重连
                                 return new_token
 
                     logger.error(f"【{self.cookie_id}】Token刷新失败: {res_json}")
@@ -1298,7 +1296,7 @@ class XianyuLive:
                 
                 for i in range(steps):
                     t = i / steps
-                    
+
                     # 使用更复杂的缓动函数（贝塞尔曲线）
                     if t < 0.3:
                         ease = 3 * t * t
@@ -1306,16 +1304,16 @@ class XianyuLive:
                         ease = 0.3 + 0.4 * (t - 0.3) / 0.4
                     else:
                         ease = 0.7 + 0.3 * (1 - (1 - (t - 0.7) / 0.3) ** 2)
-                    
+
                     target = total_distance * ease
                     move = max(0.0, target - current)
-                    
+
                     # 添加更真实的随机性
                     move += random.uniform(-0.3, 0.5)
                     if current + move > total_distance:
                         move = total_distance - current
                     current += move
-                    
+
                     # 根据移动阶段调整抖动和延迟
                     if t < 0.15:  # 初始阶段
                         jitter_y = random.uniform(-1.5, 1.5)
@@ -1329,9 +1327,9 @@ class XianyuLive:
                     else:  # 减速阶段
                         jitter_y = random.uniform(-0.5, 0.5)
                         delay_ms = random.uniform(12, 25)
-                    
+
                     tracks.append((move, jitter_y, delay_ms))
-                    
+
                     # 随机添加微停顿（模拟人类犹豫）
                     if random.random() < 0.1:  # 10%概率添加停顿
                         tracks.append((0, 0, random.uniform(20, 60)))
@@ -1386,7 +1384,7 @@ class XianyuLive:
                 
                 if verification_status:
                     logger.info(f"【{self.cookie_id}】滑块验证状态: {verification_status}")
-                    
+
                     if verification_status.get('hasErrorCode'):
                         logger.error(f"【{self.cookie_id}】✗ 滑块验证失败，检测到错误代码: e9mBi")
                         return False
@@ -1399,7 +1397,7 @@ class XianyuLive:
                     else:
                         logger.warning(f"【{self.cookie_id}】⚠ 滑块验证状态未知，等待更长时间...")
                         await target_context.wait_for_timeout(2000)
-                        
+
                         # 再次检查
                         final_status = await target_context.evaluate('''() => {
                             const ncWrapper = document.getElementById('nc_1_wrapper');
@@ -1412,7 +1410,6 @@ class XianyuLive:
                             }
                             return null;
                         }''')
-                        
                         if final_status:
                             if final_status.get('hasErrorCode'):
                                 logger.error(f"【{self.cookie_id}】✗ 滑块验证最终失败，检测到错误代码: e9mBi")
@@ -1423,7 +1420,7 @@ class XianyuLive:
                             else:
                                 logger.warning(f"【{self.cookie_id}】⚠ 滑块验证状态仍未知")
                                 return False
-                
+
             except Exception as e:
                 logger.warning(f"【{self.cookie_id}】检查滑块验证状态时出错: {self._safe_str(e)}")
             
