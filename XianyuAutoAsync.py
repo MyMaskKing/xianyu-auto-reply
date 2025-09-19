@@ -1281,25 +1281,50 @@ class XianyuLive:
         logger.info(f"【{self.cookie_id}】开始执行滑块拖动...")
         
         try:
-            # 获取滑块和轨道的位置信息
+            # 确保元素可见、滚入视图
+            try:
+                await handle.scroll_into_view_if_needed()
+                await track.scroll_into_view_if_needed()
+            except Exception:
+                pass
+
+            try:
+                await handle.wait_for_element_state('visible', timeout=3000)
+                await track.wait_for_element_state('visible', timeout=3000)
+            except Exception:
+                logger.debug(f"【{self.cookie_id}】等待元素可见超时，继续尝试获取位置")
+
+            # 获取滑块和轨道的位置信息（iframe 内为局部坐标）
             box_handle = await handle.bounding_box()
             box_track = await track.bounding_box()
-            
+
             if not box_handle or not box_track:
-                logger.warning(f"【{self.cookie_id}】✗ 无法获取滑块或轨道的位置信息")
+                # 轻微等待后重试一次
+                await target_context.wait_for_timeout(300)
+                try:
+                    await handle.scroll_into_view_if_needed()
+                    await track.scroll_into_view_if_needed()
+                except Exception:
+                    pass
+                box_handle = await handle.bounding_box()
+                box_track = await track.bounding_box()
+
+            if not box_handle or not box_track:
+                logger.warning(f"【{self.cookie_id}】✗ 无法获取滑块或轨道的位置信息 (handle:{bool(box_handle)} track:{bool(box_track)})")
                 return False
-            
+
             # 计算拖动距离
             distance = max(10, box_track['width'] - box_handle['width'] - 5)
+
+            # 在 Playwright 中，bounding_box 返回的是相对于主页面视口的坐标
+            # 对 iframe 内元素无需再叠加 iframe 偏移，否则会导致坐标双重偏移
             start_x = box_handle['x'] + box_handle['width'] / 2
             start_y = box_handle['y'] + box_handle['height'] / 2
-            
+
             logger.info(f"【{self.cookie_id}】滑块位置: ({start_x}, {start_y}), 拖动距离: {distance}")
-            
-            # 移动到滑块位置
-            await page.mouse.move(start_x, start_y, steps=3)
-            await page.mouse.down()
-            await target_context.wait_for_timeout(120)
+
+            # 偏移重试序列（像素）
+            distance_offsets = [0, 6, -6]
             
             # 生成更真实的人类轨迹
             def _generate_human_tracks(total_distance):
@@ -1363,86 +1388,72 @@ class XianyuLive:
                 
                 return tracks
             
-            # 执行拖动
-            tracks = _generate_human_tracks(distance)
-            cur_x = start_x
-            for dx, dy, delay_ms in tracks:
-                cur_x += dx
-                await page.mouse.move(cur_x, start_y + dy, steps=2)
-                await target_context.wait_for_timeout(int(delay_ms))
-            
-            # 松开鼠标
-            await target_context.wait_for_timeout(200)
-            await page.mouse.up()
-            await target_context.wait_for_timeout(800)
-            
-            # 检查滑块验证状态
-            try:
-                # 等待验证结果
-                await target_context.wait_for_timeout(1000)
-                
-                # 检查验证是否成功
-                verification_status = await target_context.evaluate('''() => {
-                    // 检查阿里云滑块验证的状态
-                    const ncWrapper = document.getElementById('nc_1_wrapper');
-                    const ncContainer = document.querySelector('.nc-container');
-                    
-                    if (ncWrapper) {
-                        return {
-                            wrapperVisible: ncWrapper.style.display !== 'none',
-                            wrapperClass: ncWrapper.className,
-                            hasSuccessClass: ncWrapper.className.includes('success') || ncWrapper.className.includes('ok'),
-                            hasErrorClass: ncWrapper.className.includes('error') || ncWrapper.className.includes('fail'),
-                            hasErrorCode: ncWrapper.textContent.includes('e9mBi') || document.body.textContent.includes('e9mBi')
-                        };
-                    }
-                    return null;
-                }''')
-                
-                if verification_status:
+            # 带偏移的重试拖动
+            for attempt_index, offset in enumerate(distance_offsets, start=1):
+                attempt_distance = max(10, distance + offset)
+
+                # 确保页面在前台，并将鼠标悬停到滑块上以激活焦点/状态
+                try:
+                    await page.bring_to_front()
+                except Exception:
+                    pass
+                try:
+                    await handle.hover()
+                except Exception:
+                    pass
+                # 移动到滑块位置并“按住”一会再拖动
+                await page.mouse.move(int(start_x), int(start_y), steps=3)
+                await page.mouse.down()
+                await target_context.wait_for_timeout(random.randint(180, 320))
+
+                tracks = _generate_human_tracks(attempt_distance)
+                cur_x = start_x
+                for dx, dy, delay_ms in tracks:
+                    cur_x += dx
+                    await page.mouse.move(int(cur_x), int(start_y + dy), steps=2)
+                    await target_context.wait_for_timeout(int(delay_ms))
+
+                # 松开鼠标并等待结果
+                await target_context.wait_for_timeout(200)
+                await page.mouse.up()
+                await target_context.wait_for_timeout(900)
+
+                # 检查滑块验证状态（增强版）
+                try:
+                    await target_context.wait_for_timeout(600)
+                    verification_status = await target_context.evaluate('''() => {
+                        const ncWrapper = document.getElementById('nc_1_wrapper');
+                        const okText = document.querySelector('.nc-lang-cnt');
+                        const okIcon = document.querySelector('.nc_iconfont.nc_success');
+                        const hidden = ncWrapper ? (getComputedStyle(ncWrapper).display === 'none') : false;
+                        const cls = ncWrapper ? ncWrapper.className : '';
+                        const hasSuccessClass = cls.includes('success') || cls.includes('ok');
+                        const hasErrorClass = cls.includes('error') || cls.includes('fail');
+                        const hasErrorCode = (ncWrapper && ncWrapper.textContent.includes('e9mBi')) || document.body.textContent.includes('e9mBi');
+                        const okTextStr = okText ? (okText.textContent || '') : '';
+                        return { hidden, hasSuccessClass, hasErrorClass, hasErrorCode, okText: okTextStr, okIcon: !!okIcon };
+                    }''')
+
                     logger.info(f"【{self.cookie_id}】滑块验证状态: {verification_status}")
 
-                    if verification_status.get('hasErrorCode'):
-                        logger.error(f"【{self.cookie_id}】✗ 滑块验证失败，检测到错误代码: e9mBi")
-                        return False
-                    elif verification_status.get('hasSuccessClass'):
-                        logger.info(f"【{self.cookie_id}】✓ 滑块验证成功")
-                        return True
-                    elif verification_status.get('hasErrorClass'):
-                        logger.error(f"【{self.cookie_id}】✗ 滑块验证失败")
-                        return False
-                    else:
-                        logger.warning(f"【{self.cookie_id}】⚠ 滑块验证状态未知，等待更长时间...")
-                        await target_context.wait_for_timeout(2000)
+                    if verification_status:
+                        if verification_status.get('hasErrorCode') or verification_status.get('hasErrorClass'):
+                            logger.error(f"【{self.cookie_id}】✗ 滑块验证失败")
+                            return False
+                        if (verification_status.get('hasSuccessClass') or
+                            verification_status.get('hidden') or
+                            ('验证通过' in (verification_status.get('okText') or '')) or
+                            verification_status.get('okIcon')):
+                            logger.info(f"【{self.cookie_id}】✓ 滑块验证成功")
+                            return True
 
-                        # 再次检查
-                        final_status = await target_context.evaluate('''() => {
-                            const ncWrapper = document.getElementById('nc_1_wrapper');
-                            if (ncWrapper) {
-                                return {
-                                    hasSuccessClass: ncWrapper.className.includes('success') || ncWrapper.className.includes('ok'),
-                                    hasErrorClass: ncWrapper.className.includes('error') || ncWrapper.className.includes('fail'),
-                                    hasErrorCode: ncWrapper.textContent.includes('e9mBi') || document.body.textContent.includes('e9mBi')
-                                };
-                            }
-                            return null;
-                        }''')
-                        if final_status:
-                            if final_status.get('hasErrorCode'):
-                                logger.error(f"【{self.cookie_id}】✗ 滑块验证最终失败，检测到错误代码: e9mBi")
-                                return False
-                            elif final_status.get('hasSuccessClass'):
-                                logger.info(f"【{self.cookie_id}】✓ 滑块验证最终成功")
-                                return True
-                            else:
-                                logger.warning(f"【{self.cookie_id}】⚠ 滑块验证状态仍未知")
-                                return False
+                    # 未知则继续下一次偏移重试
+                    logger.warning(f"【{self.cookie_id}】⚠ 滑块验证状态未知，准备第{attempt_index+1}次重试(偏移 {offset} 像素)")
+                except Exception as e:
+                    logger.warning(f"【{self.cookie_id}】检查滑块验证状态时出错: {self._safe_str(e)}")
 
-            except Exception as e:
-                logger.warning(f"【{self.cookie_id}】检查滑块验证状态时出错: {self._safe_str(e)}")
-            
-            logger.info(f"【{self.cookie_id}】✓ 滑块拖动完成")
-            return True
+            logger.warning(f"【{self.cookie_id}】✗ 多次尝试后仍未通过滑块验证")
+            return False
             
         except Exception as e:
             logger.error(f"【{self.cookie_id}】执行滑块拖动时出错: {self._safe_str(e)}")
