@@ -179,7 +179,7 @@ class XianyuLive:
         self.token_refresh_interval = TOKEN_REFRESH_INTERVAL
         self.token_retry_interval = TOKEN_RETRY_INTERVAL
         self.refresh_token_browser_retry = 0  # 通过浏览器刷新Cookie以修复token失败的重试计数
-        self.refresh_token_browser_retry_limit = 3  # 最多尝试3次
+        self.refresh_token_browser_retry_limit = 1  # 最多尝试1次
         self.last_token_refresh_time = 0
         self.current_token = None
         self.token_refresh_task = None
@@ -821,6 +821,11 @@ class XianyuLive:
                                 self.current_token = new_token
                                 self.last_token_refresh_time = time.time()
 
+                                # Token刷新成功，重置浏览器刷新重试计数
+                                if self.refresh_token_browser_retry > 0:
+                                    logger.info(f"【{self.cookie_id}】Token刷新成功，重置浏览器刷新重试计数 (之前重试了{self.refresh_token_browser_retry}次)")
+                                    self.refresh_token_browser_retry = 0
+
                                 logger.info(f"【{self.cookie_id}】Token刷新成功")
                                 # 不在此处重启实例，避免主循环与重启产生竞态导致循环重启
                                 # 由 token_refresh_loop 设置标志并关闭 ws 触发主循环重连
@@ -831,32 +836,33 @@ class XianyuLive:
                     # 清空当前token，确保下次重试时重新获取
                     self.current_token = None
 
-                    # 尝试通过浏览器刷新Cookie来解决问题
-                    try:
-                        # 保存验证URL到类变量
-                        if 'data' in res_json and 'url' in res_json['data']:
-                            self.verification_url = res_json['data']['url']
-                            logger.info(f"【{self.cookie_id}】保存验证URL到类变量: {self.verification_url}")
+                    # 检查是否需要处理x5sec验证
+                    if 'data' in res_json and 'url' in res_json['data']:
+                        verification_url = res_json['data']['url']
+                        logger.info(f"【{self.cookie_id}】检测到x5sec验证URL: {verification_url}")
                         
-                        # 控制通过浏览器刷新Cookie的重试次数
+                        # 控制x5sec验证的重试次数
                         if self.refresh_token_browser_retry >= self.refresh_token_browser_retry_limit:
-                            logger.error(f"【{self.cookie_id}】通过浏览器刷新Cookie已达到上限({self.refresh_token_browser_retry_limit})，停止重试")
-                            await self.send_token_refresh_notification("Token刷新失败且达到浏览器刷新上限，已停止重试", "token_refresh_exhausted")
+                            logger.error(f"【{self.cookie_id}】x5sec验证已达到上限({self.refresh_token_browser_retry_limit})，停止重试")
+                            await self.send_token_refresh_notification("Token刷新失败且达到x5sec验证上限，已停止重试", "token_refresh_exhausted")
                             return None
 
                         self.refresh_token_browser_retry += 1
-                        logger.info(f"【{self.cookie_id}】Token刷新失败，尝试通过浏览器刷新Cookie (第{self.refresh_token_browser_retry}/{self.refresh_token_browser_retry_limit}次)")
-                        refresh_success = await self._refresh_cookies_via_browser()
-                        logger.info(f"【{self.cookie_id}】_refresh_cookies_via_browser返回结果: {refresh_success}")
-                        if refresh_success:
-                            logger.info(f"【{self.cookie_id}】Cookie刷新成功，重置重试计数并重新尝试获取Token")
-                            self.refresh_token_browser_retry = 0
-                            # 递归调用refresh_token，使用新的Cookie
-                            return await self.refresh_token()
-                        else:
-                            logger.error(f"【{self.cookie_id}】Cookie刷新也失败")
-                    except Exception as e:
-                        logger.error(f"【{self.cookie_id}】Cookie刷新过程中发生异常: {self._safe_str(e)}")
+                        logger.info(f"【{self.cookie_id}】Token刷新失败，尝试处理x5sec验证 (第{self.refresh_token_browser_retry}/{self.refresh_token_browser_retry_limit}次)")
+                        
+                        # 直接调用x5sec验证处理
+                        try:
+                            verification_success = await self._handle_x5sec_verification_direct(verification_url)
+                            if verification_success:
+                                logger.info(f"【{self.cookie_id}】x5sec验证处理成功，等待下次token刷新时重置重试计数")
+                                # 验证成功后，等待下次token刷新循环自然进行
+                                return None
+                            else:
+                                logger.error(f"【{self.cookie_id}】x5sec验证处理失败")
+                        except Exception as e:
+                            logger.error(f"【{self.cookie_id}】处理x5sec验证时发生异常: {self._safe_str(e)}")
+                    else:
+                        logger.warning(f"【{self.cookie_id}】Token刷新失败，但没有检测到验证URL")
 
                     # 发送Token刷新失败通知
                     await self.send_token_refresh_notification(f"Token刷新失败: {res_json}", "token_refresh_failed")
@@ -868,26 +874,33 @@ class XianyuLive:
             # 清空当前token，确保下次重试时重新获取
             self.current_token = None
 
-            # 尝试通过浏览器刷新Cookie来解决问题
-            try:
+            # 检查是否需要处理x5sec验证（异常情况下）
+            if hasattr(self, 'verification_url') and self.verification_url:
+                verification_url = self.verification_url
+                logger.info(f"【{self.cookie_id}】异常情况下检测到x5sec验证URL: {verification_url}")
+                
+                # 控制x5sec验证的重试次数
                 if self.refresh_token_browser_retry >= self.refresh_token_browser_retry_limit:
-                    logger.error(f"【{self.cookie_id}】通过浏览器刷新Cookie已达到上限({self.refresh_token_browser_retry_limit})，停止重试")
-                    await self.send_token_refresh_notification("Token刷新异常且达到浏览器刷新上限，已停止重试", "token_refresh_exhausted")
+                    logger.error(f"【{self.cookie_id}】x5sec验证已达到上限({self.refresh_token_browser_retry_limit})，停止重试")
+                    await self.send_token_refresh_notification("Token刷新异常且达到x5sec验证上限，已停止重试", "token_refresh_exhausted")
                     return None
 
                 self.refresh_token_browser_retry += 1
-                logger.info(f"【{self.cookie_id}】Token刷新异常，尝试通过浏览器刷新Cookie (第{self.refresh_token_browser_retry}/{self.refresh_token_browser_retry_limit}次)")
-                refresh_success = await self._refresh_cookies_via_browser()
-                logger.info(f"【{self.cookie_id}】_refresh_cookies_via_browser返回结果: {refresh_success}")
-                if refresh_success:
-                    logger.info(f"【{self.cookie_id}】Cookie刷新成功，重置重试计数并重新尝试获取Token")
-                    self.refresh_token_browser_retry = 0
-                    # 递归调用refresh_token，使用新的Cookie
-                    return await self.refresh_token()
-                else:
-                    logger.error(f"【{self.cookie_id}】Cookie刷新也失败")
-            except Exception as refresh_e:
-                logger.error(f"【{self.cookie_id}】Cookie刷新过程中发生异常: {self._safe_str(refresh_e)}")
+                logger.info(f"【{self.cookie_id}】Token刷新异常，尝试处理x5sec验证 (第{self.refresh_token_browser_retry}/{self.refresh_token_browser_retry_limit}次)")
+                
+                # 直接调用x5sec验证处理
+                try:
+                    verification_success = await self._handle_x5sec_verification_direct(verification_url)
+                    if verification_success:
+                        logger.info(f"【{self.cookie_id}】x5sec验证处理成功，等待下次token刷新时重置重试计数")
+                        # 验证成功后，等待下次token刷新循环自然进行
+                        return None
+                    else:
+                        logger.error(f"【{self.cookie_id}】x5sec验证处理失败")
+                except Exception as e:
+                    logger.error(f"【{self.cookie_id}】处理x5sec验证时发生异常: {self._safe_str(e)}")
+            else:
+                logger.warning(f"【{self.cookie_id}】Token刷新异常，但没有检测到验证URL")
 
             # 发送Token刷新异常通知
             await self.send_token_refresh_notification(f"Token刷新异常: {str(e)}", "token_refresh_exception")
@@ -922,6 +935,239 @@ class XianyuLive:
             # 发送Cookie更新失败通知
             await self.send_token_refresh_notification(f"Cookie更新失败: {str(e)}", "cookie_update_failed")
 
+    async def _handle_x5sec_verification_direct(self, verification_url):
+        """直接处理x5sec验证（滑块验证码）"""
+        logger.info(f"【{self.cookie_id}】开始直接处理x5sec验证: {verification_url}")
+        
+        playwright = None
+        browser = None
+        try:
+            import asyncio
+            from playwright.async_api import async_playwright
+
+            # 检测Docker环境
+            is_docker = (
+                DOCKER_ENV or
+                os.getenv('DOCKER_ENV') or 
+                os.path.exists('/.dockerenv') or 
+                os.getenv('CONTAINER')
+            )
+            
+            # 安全地检查cgroup文件
+            try:
+                if os.path.exists('/proc/1/cgroup'):
+                    with open('/proc/1/cgroup', 'r') as f:
+                        cgroup_content = f.read()
+                        if 'docker' in cgroup_content:
+                            is_docker = True
+            except Exception:
+                pass
+
+            if is_docker:
+                logger.info(f"【{self.cookie_id}】检测到Docker/容器环境，应用asyncio修复")
+                # Docker环境处理逻辑
+                class DummyChildWatcher:
+                    def __enter__(self):
+                        return self
+                    def __exit__(self, *args):
+                        pass
+                    def is_active(self):
+                        return True
+                    def add_child_handler(self, *args, **kwargs):
+                        pass
+                    def remove_child_handler(self, *args, **kwargs):
+                        pass
+                    def attach_loop(self, *args, **kwargs):
+                        pass
+                    def close(self):
+                        pass
+                    def __del__(self):
+                        pass
+
+                class DockerEventLoopPolicy(asyncio.DefaultEventLoopPolicy):
+                    def get_child_watcher(self):
+                        return DummyChildWatcher()
+
+                old_policy = asyncio.get_event_loop_policy()
+                asyncio.set_event_loop_policy(DockerEventLoopPolicy())
+
+                try:
+                    playwright = await asyncio.wait_for(
+                        async_playwright().start(),
+                        timeout=30.0
+                    )
+                    logger.info(f"【{self.cookie_id}】Docker环境下Playwright启动成功")
+                except asyncio.TimeoutError:
+                    logger.error(f"【{self.cookie_id}】Docker环境下Playwright启动超时")
+                    asyncio.set_event_loop_policy(old_policy)
+                    return False
+                except Exception as e:
+                    logger.error(f"【{self.cookie_id}】Docker环境下Playwright启动失败: {self._safe_str(e)}")
+                    asyncio.set_event_loop_policy(old_policy)
+                    return False
+                finally:
+                    asyncio.set_event_loop_policy(old_policy)
+            else:
+                try:
+                    playwright = await asyncio.wait_for(
+                        async_playwright().start(),
+                        timeout=30.0
+                    )
+                    logger.debug(f"【{self.cookie_id}】非Docker环境下Playwright启动成功")
+                except asyncio.TimeoutError:
+                    logger.error(f"【{self.cookie_id}】Playwright启动超时")
+                    return False
+                except Exception as e:
+                    logger.error(f"【{self.cookie_id}】Playwright启动失败: {self._safe_str(e)}")
+                    return False
+
+            # 启动浏览器
+            browser_args = [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--no-first-run',
+                '--no-zygote',
+                '--disable-gpu',
+                '--disable-background-timer-throttling',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-renderer-backgrounding',
+                '--disable-features=TranslateUI',
+                '--disable-ipc-flooding-protection',
+                '--disable-extensions',
+                '--disable-default-apps',
+                '--disable-sync',
+                '--disable-translate',
+                '--hide-scrollbars',
+                '--mute-audio',
+                '--no-default-browser-check',
+                '--no-pings'
+            ]
+
+            if os.getenv('DOCKER_ENV'):
+                browser_args.extend([
+                    '--single-process',
+                    '--disable-background-networking',
+                    '--disable-client-side-phishing-detection',
+                    '--disable-hang-monitor',
+                    '--disable-popup-blocking',
+                    '--disable-prompt-on-repost',
+                    '--disable-web-resources',
+                    '--metrics-recording-only',
+                    '--safebrowsing-disable-auto-update',
+                    '--enable-automation',
+                    '--password-store=basic',
+                    '--use-mock-keychain'
+                ])
+
+            logger.info(f"【{self.cookie_id}】启动浏览器，headless模式: {BROWSER_HEADLESS}")
+            browser = await playwright.chromium.launch(
+                headless=BROWSER_HEADLESS,
+                args=browser_args
+            )
+
+            # 创建浏览器上下文
+            context_options = {
+                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
+            }
+            context_options['viewport'] = {'width': 1920, 'height': 1080}
+
+            context = await browser.new_context(**context_options)
+
+            # 设置当前Cookie
+            cookies = []
+            for cookie_pair in self.cookies_str.split('; '):
+                if '=' in cookie_pair:
+                    name, value = cookie_pair.split('=', 1)
+                    cookies.append({
+                        'name': name.strip(),
+                        'value': value.strip(),
+                        'domain': '.goofish.com',
+                        'path': '/'
+                    })
+
+            await context.add_cookies(cookies)
+            logger.info(f"【{self.cookie_id}】已设置 {len(cookies)} 个Cookie到浏览器")
+
+            # 创建页面
+            page = await context.new_page()
+            await asyncio.sleep(0.1)
+
+            # 访问验证页面
+            logger.info(f"【{self.cookie_id}】访问x5sec验证页面: {verification_url}")
+            try:
+                await page.goto(verification_url, wait_until='domcontentloaded', timeout=15000)
+                logger.info(f"【{self.cookie_id}】验证页面访问成功")
+            except Exception as e:
+                if 'timeout' in str(e).lower():
+                    logger.warning(f"【{self.cookie_id}】验证页面访问超时，尝试降级策略...")
+                    await page.goto(verification_url, wait_until='load', timeout=20000)
+                    logger.info(f"【{self.cookie_id}】验证页面访问成功（降级策略）")
+                else:
+                    raise e
+
+            # 等待页面稳定
+            await asyncio.sleep(3)
+
+            # 处理滑块验证
+            logger.info(f"【{self.cookie_id}】开始处理滑块验证...")
+            slider_handled = await self._detect_and_solve_slider(page)
+            
+            if slider_handled:
+                logger.info(f"【{self.cookie_id}】✓ 成功处理x5sec滑块验证")
+                
+                # 等待验证完成
+                await asyncio.sleep(2)
+                
+                # 获取更新后的Cookie
+                updated_cookies = await context.cookies()
+                new_cookies_dict = {}
+                for cookie in updated_cookies:
+                    new_cookies_dict[cookie['name']] = cookie['value']
+
+                # 更新self.cookies和cookies_str
+                self.cookies.update(new_cookies_dict)
+                self.cookies_str = '; '.join([f"{k}={v}" for k, v in self.cookies.items()])
+
+                # 更新数据库中的Cookie
+                await self.update_config_cookies()
+                
+                logger.info(f"【{self.cookie_id}】x5sec验证处理完成，Cookie已更新")
+                return True
+            else:
+                logger.warning(f"【{self.cookie_id}】✗ 未能处理x5sec滑块验证")
+                return False
+
+        except Exception as e:
+            logger.error(f"【{self.cookie_id}】处理x5sec验证时出错: {self._safe_str(e)}")
+            return False
+        finally:
+            # 确保资源清理
+            try:
+                if browser:
+                    logger.info(f"【{self.cookie_id}】开始清理浏览器资源...")
+                    try:
+                        await asyncio.wait_for(browser.close(), timeout=10.0)
+                        logger.info(f"【{self.cookie_id}】浏览器资源清理完成")
+                    except asyncio.TimeoutError:
+                        logger.warning(f"【{self.cookie_id}】浏览器关闭超时，强制清理")
+                    except Exception as browser_e:
+                        logger.warning(f"【{self.cookie_id}】浏览器关闭时出错: {self._safe_str(browser_e)}")
+                
+                if playwright:
+                    logger.info(f"【{self.cookie_id}】开始清理Playwright资源...")
+                    try:
+                        await asyncio.wait_for(playwright.stop(), timeout=10.0)
+                        logger.info(f"【{self.cookie_id}】Playwright资源清理完成")
+                    except asyncio.TimeoutError:
+                        logger.warning(f"【{self.cookie_id}】Playwright停止超时，强制清理")
+                    except Exception as playwright_e:
+                        logger.warning(f"【{self.cookie_id}】Playwright停止时出错: {self._safe_str(playwright_e)}")
+                        
+                logger.info(f"【{self.cookie_id}】所有资源清理完成")
+            except Exception as cleanup_e:
+                logger.warning(f"【{self.cookie_id}】清理浏览器资源时出错: {self._safe_str(cleanup_e)}")
 
     async def _handle_all_verifications(self, page):
         """统一处理所有类型的验证（包括弹窗和滚动条验证）"""
