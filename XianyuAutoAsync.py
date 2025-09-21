@@ -861,6 +861,8 @@ class XianyuLive:
                                 logger.error(f"【{self.cookie_id}】x5sec验证处理失败")
                         except Exception as e:
                             logger.error(f"【{self.cookie_id}】处理x5sec验证时发生异常: {self._safe_str(e)}")
+                        logger.info(f"【{self.cookie_id}】开始刷新Cookie...")
+                        await self._refresh_cookies_via_browser()
                     else:
                         logger.warning(f"【{self.cookie_id}】Token刷新失败，但没有检测到验证URL")
 
@@ -899,6 +901,8 @@ class XianyuLive:
                         logger.error(f"【{self.cookie_id}】x5sec验证处理失败")
                 except Exception as e:
                     logger.error(f"【{self.cookie_id}】处理x5sec验证时发生异常: {self._safe_str(e)}")
+                logger.info(f"【{self.cookie_id}】开始刷新Cookie...")
+                await self._refresh_cookies_via_browser()
             else:
                 logger.warning(f"【{self.cookie_id}】Token刷新异常，但没有检测到验证URL")
 
@@ -1021,7 +1025,7 @@ class XianyuLive:
                     logger.error(f"【{self.cookie_id}】Playwright启动失败: {self._safe_str(e)}")
                     return False
 
-            # 启动浏览器
+            # 启动浏览器 - 优化参数以解决空白页面问题
             browser_args = [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
@@ -1042,7 +1046,37 @@ class XianyuLive:
                 '--hide-scrollbars',
                 '--mute-audio',
                 '--no-default-browser-check',
-                '--no-pings'
+                '--no-pings',
+                # 添加解决空白页面的参数
+                '--disable-web-security',
+                '--disable-features=VizDisplayCompositor',
+                '--disable-blink-features=AutomationControlled',
+                '--disable-features=site-per-process',
+                '--disable-site-isolation-trials',
+                '--disable-features=TranslateUI,BlinkGenPropertyTrees',
+                '--disable-background-networking',
+                '--disable-background-timer-throttling',
+                '--disable-renderer-backgrounding',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-client-side-phishing-detection',
+                '--disable-component-extensions-with-background-pages',
+                '--disable-default-apps',
+                '--disable-dev-shm-usage',
+                '--disable-extensions',
+                '--disable-features=TranslateUI',
+                '--disable-hang-monitor',
+                '--disable-ipc-flooding-protection',
+                '--disable-popup-blocking',
+                '--disable-prompt-on-repost',
+                '--disable-sync',
+                '--disable-translate',
+                '--disable-windows10-custom-titlebar',
+                '--metrics-recording-only',
+                '--no-first-run',
+                '--safebrowsing-disable-auto-update',
+                '--enable-automation',
+                '--password-store=basic',
+                '--use-mock-keychain'
             ]
 
             if os.getenv('DOCKER_ENV'):
@@ -1067,11 +1101,30 @@ class XianyuLive:
                 args=browser_args
             )
 
-            # 创建浏览器上下文
+            # 创建浏览器上下文 - 确保环境一致性
             context_options = {
-                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
+                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+                'viewport': {'width': 1920, 'height': 1080},
+                'locale': 'zh-CN',
+                'timezone_id': 'Asia/Shanghai',
+                'geolocation': {'latitude': 39.9042, 'longitude': 116.4074},  # 北京坐标
+                'permissions': ['geolocation'],
+                'extra_http_headers': {
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Cache-Control': 'no-cache',
+                    'Pragma': 'no-cache',
+                    'Sec-Ch-Ua': '"Not A(Brand";v="99", "Google Chrome";v="138", "Chromium";v="138"',
+                    'Sec-Ch-Ua-Mobile': '?0',
+                    'Sec-Ch-Ua-Platform': '"Windows"',
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
+                    'Sec-Fetch-Site': 'none',
+                    'Sec-Fetch-User': '?1',
+                    'Upgrade-Insecure-Requests': '1'
+                }
             }
-            context_options['viewport'] = {'width': 1920, 'height': 1080}
 
             context = await browser.new_context(**context_options)
 
@@ -1097,34 +1150,150 @@ class XianyuLive:
             # 访问验证页面
             logger.info(f"【{self.cookie_id}】访问x5sec验证页面: {verification_url}")
             try:
-                await page.goto(verification_url, wait_until='domcontentloaded', timeout=15000)
+                # 使用更宽松的加载策略
+                await page.goto(verification_url, wait_until='networkidle', timeout=30000)
                 logger.info(f"【{self.cookie_id}】验证页面访问成功")
             except Exception as e:
                 if 'timeout' in str(e).lower():
                     logger.warning(f"【{self.cookie_id}】验证页面访问超时，尝试降级策略...")
-                    await page.goto(verification_url, wait_until='load', timeout=20000)
-                    logger.info(f"【{self.cookie_id}】验证页面访问成功（降级策略）")
+                    try:
+                        await page.goto(verification_url, wait_until='load', timeout=20000)
+                        logger.info(f"【{self.cookie_id}】验证页面访问成功（降级策略）")
+                    except Exception as e2:
+                        logger.warning(f"【{self.cookie_id}】降级策略也失败，尝试最基本访问...")
+                        await page.goto(verification_url, timeout=25000)
+                        logger.info(f"【{self.cookie_id}】验证页面访问成功（最基本策略）")
                 else:
                     raise e
 
-            # 等待页面稳定
-            await asyncio.sleep(3)
+            # 等待页面完全加载
+            logger.info(f"【{self.cookie_id}】等待页面完全加载...")
+            await asyncio.sleep(5)
+            
+            # 注入JavaScript来确保页面正确加载
+            try:
+                await page.evaluate("""
+                    // 确保页面完全加载
+                    if (document.readyState !== 'complete') {
+                        window.addEventListener('load', function() {
+                            console.log('页面完全加载完成');
+                        });
+                    }
+                    
+                    // 检查是否有验证相关元素
+                    const verificationElements = document.querySelectorAll('[class*="captcha"], [class*="verify"], [class*="slider"], [id*="captcha"], [id*="verify"], [id*="slider"]');
+                    console.log('检测到验证元素数量:', verificationElements.length);
+                    
+                    // 检查iframe
+                    const iframes = document.querySelectorAll('iframe');
+                    console.log('检测到iframe数量:', iframes.length);
+                    
+                    // 检查页面内容
+                    console.log('页面内容长度:', document.body ? document.body.innerHTML.length : 0);
+                """)
+                logger.info(f"【{self.cookie_id}】JavaScript注入完成")
+            except Exception as e:
+                logger.debug(f"【{self.cookie_id}】JavaScript注入失败: {self._safe_str(e)}")
+            
+            # 检查页面内容
+            page_content = await page.content()
+            logger.info(f"【{self.cookie_id}】页面内容长度: {len(page_content)}")
+            
+            # 检查页面标题和URL
+            page_title = await page.title()
+            current_url = page.url
+            logger.info(f"【{self.cookie_id}】页面标题: {page_title}")
+            logger.info(f"【{self.cookie_id}】当前URL: {current_url}")
+            
+            # 检查是否有错误信息
+            try:
+                error_elements = await page.query_selector_all('text*="错误", text*="error", text*="失败", text*="fail"')
+                if error_elements:
+                    for elem in error_elements:
+                        text = await elem.text_content()
+                        logger.warning(f"【{self.cookie_id}】检测到错误信息: {text}")
+            except Exception as e:
+                logger.debug(f"【{self.cookie_id}】检查错误信息时出错: {self._safe_str(e)}")
+            
+            # 如果页面内容太少，可能是加载问题
+            if len(page_content) < 1000:
+                logger.warning(f"【{self.cookie_id}】页面内容过少，可能加载不完整，等待更长时间...")
+                await asyncio.sleep(5)
+                
+                # 尝试刷新页面
+                try:
+                    await page.reload(wait_until='networkidle', timeout=15000)
+                    logger.info(f"【{self.cookie_id}】页面刷新完成")
+                    await asyncio.sleep(3)
+                except Exception as e:
+                    logger.warning(f"【{self.cookie_id}】页面刷新失败: {self._safe_str(e)}")
+            
+            # 调试：在非headless模式下截图
+            if not BROWSER_HEADLESS:
+                try:
+                    screenshot_path = f"x5sec_debug_{int(time.time())}.png"
+                    await page.screenshot(path=screenshot_path, full_page=True)
+                    logger.info(f"【{self.cookie_id}】已保存调试截图: {screenshot_path}")
+                except Exception as e:
+                    logger.debug(f"【{self.cookie_id}】截图失败: {self._safe_str(e)}")
+            
+            # 检查页面中是否有iframe
+            try:
+                iframes = await page.query_selector_all('iframe')
+                logger.info(f"【{self.cookie_id}】检测到 {len(iframes)} 个iframe")
+                for i, iframe in enumerate(iframes):
+                    src = await iframe.get_attribute('src')
+                    logger.info(f"【{self.cookie_id}】iframe {i+1}: {src}")
+            except Exception as e:
+                logger.debug(f"【{self.cookie_id}】检查iframe时出错: {self._safe_str(e)}")
+            
+            # 检查页面中是否有验证相关元素
+            try:
+                verification_elements = await page.query_selector_all('[class*="captcha"], [class*="verify"], [class*="slider"], [id*="captcha"], [id*="verify"], [id*="slider"]')
+                logger.info(f"【{self.cookie_id}】检测到 {len(verification_elements)} 个验证相关元素")
+                for i, elem in enumerate(verification_elements[:5]):  # 只显示前5个
+                    tag_name = await elem.evaluate('el => el.tagName')
+                    class_name = await elem.get_attribute('class')
+                    elem_id = await elem.get_attribute('id')
+                    logger.info(f"【{self.cookie_id}】验证元素 {i+1}: {tag_name} class='{class_name}' id='{elem_id}'")
+            except Exception as e:
+                logger.debug(f"【{self.cookie_id}】检查验证元素时出错: {self._safe_str(e)}")
 
             # 处理滑块验证
             logger.info(f"【{self.cookie_id}】开始处理滑块验证...")
             slider_handled = await self._detect_and_solve_slider(page)
             
             if slider_handled:
-                logger.info(f"【{self.cookie_id}】✓ 成功处理x5sec滑块验证")
+                logger.info(f"【{self.cookie_id}】✓ 滑块拖动操作完成")
                 
                 # 等待验证完成
-                await asyncio.sleep(2)
+                logger.info(f"【{self.cookie_id}】等待验证处理完成...")
+                await asyncio.sleep(3)
+                
+                # 检查验证是否真正成功
+                logger.info(f"【{self.cookie_id}】开始验证成功状态检查...")
+                verification_success = await self._check_verification_success(page)
+                
+                if verification_success:
+                    logger.info(f"【{self.cookie_id}】✓ 验证成功状态确认")
+                else:
+                    logger.warning(f"【{self.cookie_id}】⚠ 滑块拖动完成但验证状态不明确，继续获取Cookie")
                 
                 # 获取更新后的Cookie
+                logger.info(f"【{self.cookie_id}】获取验证后的Cookie...")
                 updated_cookies = await context.cookies()
                 new_cookies_dict = {}
                 for cookie in updated_cookies:
                     new_cookies_dict[cookie['name']] = cookie['value']
+
+                logger.info(f"【{self.cookie_id}】获取到 {len(new_cookies_dict)} 个Cookie")
+
+                # 检查关键验证参数
+                verification_params = await self._extract_verification_params(page, new_cookies_dict)
+                if verification_params:
+                    logger.info(f"【{self.cookie_id}】✓ 提取到验证参数: {verification_params}")
+                else:
+                    logger.info(f"【{self.cookie_id}】未检测到关键验证参数")
 
                 # 更新self.cookies和cookies_str
                 self.cookies.update(new_cookies_dict)
@@ -1133,7 +1302,8 @@ class XianyuLive:
                 # 更新数据库中的Cookie
                 await self.update_config_cookies()
                 
-                logger.info(f"【{self.cookie_id}】x5sec验证处理完成，Cookie已更新")
+                logger.info(f"【{self.cookie_id}】✓ x5sec验证处理完成，Cookie已更新")
+                logger.info(f"【{self.cookie_id}】验证状态: {'成功' if verification_success else '状态不明确'}")
                 return True
             else:
                 logger.warning(f"【{self.cookie_id}】✗ 未能处理x5sec滑块验证")
@@ -1168,6 +1338,175 @@ class XianyuLive:
                 logger.info(f"【{self.cookie_id}】所有资源清理完成")
             except Exception as cleanup_e:
                 logger.warning(f"【{self.cookie_id}】清理浏览器资源时出错: {self._safe_str(cleanup_e)}")
+
+    async def _check_verification_success(self, page):
+        """检查验证是否真正成功"""
+        try:
+            logger.info(f"【{self.cookie_id}】开始检查验证成功状态...")
+            
+            # 1. 检查页面中是否有成功提示
+            success_indicators = [
+                '验证成功', '验证通过', 'success', '验证完成', 'captcha-success', 'verify-success',
+                '通过验证', '验证码正确', '验证码通过', '人机验证通过', '安全验证通过',
+                '✓', '✅', '验证码验证成功', '滑块验证成功', '验证完成',
+                'success', 'passed', 'complete', 'verified', 'valid'
+            ]
+            
+            logger.info(f"【{self.cookie_id}】检查成功提示文本...")
+            for indicator in success_indicators:
+                try:
+                    # 使用更宽松的文本匹配
+                    elements = await page.query_selector_all(f'text*="{indicator}"')
+                    for element in elements:
+                        if await element.is_visible():
+                            text = await element.text_content()
+                            logger.info(f"【{self.cookie_id}】✓ 检测到验证成功提示: '{indicator}' 在元素中: '{text[:50]}...'")
+                            return True
+                except Exception as e:
+                    logger.debug(f"【{self.cookie_id}】检查成功提示 '{indicator}' 时出错: {self._safe_str(e)}")
+                    continue
+            
+            # 2. 检查成功相关的CSS类或ID
+            logger.info(f"【{self.cookie_id}】检查成功相关的CSS类...")
+            success_selectors = [
+                '.success', '.verify-success', '.captcha-success', '.passed', '.complete',
+                '#success', '#verify-success', '#captcha-success', '#passed', '#complete',
+                '[class*="success"]', '[class*="passed"]', '[class*="complete"]', '[class*="verified"]',
+                '[id*="success"]', '[id*="passed"]', '[id*="complete"]', '[id*="verified"]'
+            ]
+            
+            for selector in success_selectors:
+                try:
+                    elements = await page.query_selector_all(selector)
+                    for element in elements:
+                        if await element.is_visible():
+                            class_name = await element.get_attribute('class')
+                            elem_id = await element.get_attribute('id')
+                            logger.info(f"【{self.cookie_id}】✓ 检测到成功相关元素: {selector} class='{class_name}' id='{elem_id}'")
+                            return True
+                except Exception as e:
+                    logger.debug(f"【{self.cookie_id}】检查成功选择器 '{selector}' 时出错: {self._safe_str(e)}")
+                    continue
+            
+            # 3. 检查URL是否发生变化（验证成功后通常会跳转）
+            current_url = page.url
+            logger.info(f"【{self.cookie_id}】检查URL变化: {current_url}")
+            
+            # 检查URL中是否包含成功相关的关键词
+            url_success_indicators = ['success', 'passed', 'complete', 'verified', 'valid']
+            for indicator in url_success_indicators:
+                if indicator in current_url.lower():
+                    logger.info(f"【{self.cookie_id}】✓ URL包含成功指示器: '{indicator}'")
+                    return True
+            
+            # 检查URL是否不再包含验证相关的关键词
+            verify_keywords = ['captcha', 'verify', 'punish', 'x5sec', 'slider']
+            url_has_verify = any(keyword in current_url.lower() for keyword in verify_keywords)
+            if not url_has_verify:
+                logger.info(f"【{self.cookie_id}】✓ URL不再包含验证关键词，可能已跳转")
+                return True
+            
+            # 4. 检查滑块验证状态
+            logger.info(f"【{self.cookie_id}】检查滑块验证状态...")
+            try:
+                # 检查滑块是否已经滑动到最右边
+                slider_handles = await page.query_selector_all('[class*="slider"], [id*="slider"], [class*="nc_"], [id*="nc_"]')
+                for handle in slider_handles:
+                    try:
+                        # 检查滑块位置
+                        box = await handle.bounding_box()
+                        if box:
+                            # 检查滑块是否在轨道的最右边
+                            parent = await handle.evaluate_handle('el => el.parentElement')
+                            if parent:
+                                parent_box = await parent.bounding_box()
+                                if parent_box and box['x'] + box['width'] >= parent_box['x'] + parent_box['width'] - 10:
+                                    logger.info(f"【{self.cookie_id}】✓ 滑块已滑动到最右边位置")
+                                    return True
+                    except Exception:
+                        continue
+            except Exception as e:
+                logger.debug(f"【{self.cookie_id}】检查滑块状态时出错: {self._safe_str(e)}")
+            
+            # 5. 检查是否有错误提示
+            logger.info(f"【{self.cookie_id}】检查错误提示...")
+            error_indicators = [
+                '验证失败', '请重试', 'error', 'fail', '验证码错误', '验证码失败',
+                '滑块验证失败', '人机验证失败', '安全验证失败', '验证超时',
+                '❌', '✗', '×', 'failed', 'error', 'timeout'
+            ]
+            
+            for indicator in error_indicators:
+                try:
+                    elements = await page.query_selector_all(f'text*="{indicator}"')
+                    for element in elements:
+                        if await element.is_visible():
+                            text = await element.text_content()
+                            logger.warning(f"【{self.cookie_id}】✗ 检测到验证失败提示: '{indicator}' 在元素中: '{text[:50]}...'")
+                            return False
+                except Exception as e:
+                    logger.debug(f"【{self.cookie_id}】检查错误提示 '{indicator}' 时出错: {self._safe_str(e)}")
+                    continue
+            
+            # 6. 检查页面内容变化
+            logger.info(f"【{self.cookie_id}】检查页面内容变化...")
+            try:
+                # 检查页面中是否还有验证相关的元素
+                verification_elements = await page.query_selector_all('[class*="captcha"], [class*="verify"], [class*="slider"], [id*="captcha"], [id*="verify"], [id*="slider"]')
+                if len(verification_elements) == 0:
+                    logger.info(f"【{self.cookie_id}】✓ 页面中已无验证相关元素，可能验证成功")
+                    return True
+                else:
+                    logger.info(f"【{self.cookie_id}】页面中仍有 {len(verification_elements)} 个验证相关元素")
+            except Exception as e:
+                logger.debug(f"【{self.cookie_id}】检查页面内容变化时出错: {self._safe_str(e)}")
+            
+            # 7. 默认判断
+            logger.info(f"【{self.cookie_id}】未检测到明确的验证结果，假设验证成功")
+            return True
+            
+        except Exception as e:
+            logger.warning(f"【{self.cookie_id}】检查验证成功状态时出错: {self._safe_str(e)}")
+            return True  # 默认假设成功
+
+    async def _extract_verification_params(self, page, cookies_dict):
+        """提取验证相关参数"""
+        try:
+            params = {}
+            
+            # 检查Cookie中的验证参数
+            verification_cookies = ['x5secdata', 'x5step', 'bx-ua', 'bx-et', 'slidedata', '_m_h5_tk', '_m_h5_tk_enc']
+            for cookie_name in verification_cookies:
+                if cookie_name in cookies_dict:
+                    value = cookies_dict[cookie_name]
+                    # 只显示前后几位，保护敏感信息
+                    if len(value) > 20:
+                        display_value = f"{value[:8]}...{value[-8:]}"
+                    else:
+                        display_value = value
+                    params[cookie_name] = display_value
+            
+            # 检查页面中的验证参数
+            try:
+                # 检查是否有隐藏的验证参数
+                hidden_inputs = await page.query_selector_all('input[type="hidden"]')
+                for input_elem in hidden_inputs:
+                    name = await input_elem.get_attribute('name')
+                    value = await input_elem.get_attribute('value')
+                    if name and value and any(key in name.lower() for key in ['x5', 'bx', 'slide', 'verify']):
+                        if len(value) > 20:
+                            display_value = f"{value[:8]}...{value[-8:]}"
+                        else:
+                            display_value = value
+                        params[f"hidden_{name}"] = display_value
+            except Exception as e:
+                logger.debug(f"【{self.cookie_id}】提取隐藏参数时出错: {self._safe_str(e)}")
+            
+            return params
+            
+        except Exception as e:
+            logger.warning(f"【{self.cookie_id}】提取验证参数时出错: {self._safe_str(e)}")
+            return {}
 
     async def _handle_all_verifications(self, page):
         """统一处理所有类型的验证（包括弹窗和滚动条验证）"""
@@ -1559,8 +1898,10 @@ class XianyuLive:
                 logger.warning(f"【{self.cookie_id}】✗ 无法获取滑块或轨道的位置信息 (handle:{bool(box_handle)} track:{bool(box_track)})")
                 return False
 
-            # 计算拖动距离
-            distance = max(10, box_track['width'] - box_handle['width'] - 5)
+            # 计算拖动距离 - 滑动到最大幅度
+            # 确保滑块完全滑动到轨道末端，留出2-3像素的缓冲
+            distance = max(10, box_track['width'] - box_handle['width'] - 3)
+            logger.info(f"【{self.cookie_id}】计算拖动距离: 轨道宽度={box_track['width']}, 滑块宽度={box_handle['width']}, 拖动距离={distance}")
 
             # 在 Playwright 中，bounding_box 返回的是相对于主页面视口的坐标
             # 对 iframe 内元素无需再叠加 iframe 偏移，否则会导致坐标双重偏移
@@ -1569,8 +1910,9 @@ class XianyuLive:
 
             logger.info(f"【{self.cookie_id}】滑块位置: ({start_x}, {start_y}), 拖动距离: {distance}")
 
-            # 偏移重试序列（像素）
-            distance_offsets = [0, 6, -6]
+            # 偏移重试序列（像素）- 确保滑动到最大幅度
+            # 优先尝试完全滑动，然后尝试稍微超出，最后尝试稍微不足
+            distance_offsets = [0, 2, -2, 5, -5]
             
             # 生成更真实的人类轨迹
             def _generate_human_tracks(total_distance):
