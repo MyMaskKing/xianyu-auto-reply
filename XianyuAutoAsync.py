@@ -1858,13 +1858,34 @@ class XianyuLive:
         logger.info(f"【{self.cookie_id}】开始处理iframe滑块验证...")
         
         try:
-            # 等待iframe加载完成
-            await iframe.wait_for_load_state('networkidle', timeout=10000)
-            logger.info(f"【{self.cookie_id}】iframe加载完成")
+            # 等待iframe加载完成 - 使用更宽松的策略
+            try:
+                # 首先尝试等待networkidle状态
+                await iframe.wait_for_load_state('networkidle', timeout=8000)
+                logger.info(f"【{self.cookie_id}】iframe加载完成（networkidle）")
+            except Exception as e:
+                if 'timeout' in str(e).lower():
+                    logger.warning(f"【{self.cookie_id}】iframe networkidle超时，尝试降级策略...")
+                    try:
+                        # 降级策略：只等待load状态
+                        await iframe.wait_for_load_state('load', timeout=5000)
+                        logger.info(f"【{self.cookie_id}】iframe加载完成（load状态）")
+                    except Exception as e2:
+                        if 'timeout' in str(e2).lower():
+                            logger.warning(f"【{self.cookie_id}】iframe load也超时，尝试domcontentloaded...")
+                            try:
+                                # 最后尝试：只等待domcontentloaded
+                                await iframe.wait_for_load_state('domcontentloaded', timeout=3000)
+                                logger.info(f"【{self.cookie_id}】iframe加载完成（domcontentloaded）")
+                            except Exception as e3:
+                                logger.warning(f"【{self.cookie_id}】iframe所有加载状态都超时，继续尝试处理滑块...")
+                        else:
+                            logger.warning(f"【{self.cookie_id}】iframe load状态检查失败: {self._safe_str(e2)}")
+                else:
+                    logger.warning(f"【{self.cookie_id}】iframe networkidle检查失败: {self._safe_str(e)}")
             
-            # 等待滑块验证元素出现
+            # 等待滑块验证元素出现 - 使用更宽松的策略
             logger.info(f"【{self.cookie_id}】等待滑块验证元素加载...")
-            await asyncio.sleep(2)
             
             # 在iframe中查找滑块组件
             slider_selectors = [
@@ -1877,36 +1898,49 @@ class XianyuLive:
             ]
             
             handle = None
-            for sel in slider_selectors:
-                try:
-                    handle = await iframe.query_selector(sel)
-                    if handle and await handle.is_visible():
-                        logger.info(f"【{self.cookie_id}】✓ 在iframe中找到滑块按钮: {sel}")
-                        break
-                except Exception as e:
-                    logger.debug(f"【{self.cookie_id}】iframe中查找{sel}失败: {self._safe_str(e)}")
-                    continue
+            max_retries = 3
+            retry_delays = [2, 3, 5]  # 递增的等待时间
             
-            if not handle:
-                logger.warning(f"【{self.cookie_id}】✗ 在iframe中未找到滑块按钮")
-                # 尝试等待更长时间
-                logger.info(f"【{self.cookie_id}】等待更长时间后重试...")
-                await asyncio.sleep(3)
+            for retry in range(max_retries):
+                if retry > 0:
+                    logger.info(f"【{self.cookie_id}】第{retry+1}次尝试查找滑块按钮...")
+                    await asyncio.sleep(retry_delays[retry-1])
                 
                 for sel in slider_selectors:
                     try:
                         handle = await iframe.query_selector(sel)
-                        if handle and await handle.is_visible():
-                            logger.info(f"【{self.cookie_id}】✓ 重试后在iframe中找到滑块按钮: {sel}")
-                            break
+                        if handle:
+                            # 检查元素是否可见，如果不可见也尝试等待一下
+                            try:
+                                is_visible = await handle.is_visible()
+                                if is_visible:
+                                    logger.info(f"【{self.cookie_id}】✓ 在iframe中找到滑块按钮: {sel}")
+                                    break
+                                else:
+                                    logger.debug(f"【{self.cookie_id}】滑块按钮存在但不可见: {sel}")
+                                    # 等待一下再检查
+                                    await asyncio.sleep(1)
+                                    is_visible = await handle.is_visible()
+                                    if is_visible:
+                                        logger.info(f"【{self.cookie_id}】✓ 等待后在iframe中找到滑块按钮: {sel}")
+                                        break
+                            except Exception as visibility_e:
+                                logger.debug(f"【{self.cookie_id}】检查滑块按钮可见性失败: {self._safe_str(visibility_e)}")
+                                # 即使可见性检查失败，也尝试使用这个元素
+                                logger.info(f"【{self.cookie_id}】✓ 在iframe中找到滑块按钮（可见性检查失败但元素存在）: {sel}")
+                                break
                     except Exception as e:
+                        logger.debug(f"【{self.cookie_id}】iframe中查找{sel}失败: {self._safe_str(e)}")
                         continue
                 
-                if not handle:
-                    logger.error(f"【{self.cookie_id}】✗ 重试后仍未找到滑块按钮")
-                    return False
+                if handle:
+                    break
             
-            # 查找滑块轨道
+            if not handle:
+                logger.error(f"【{self.cookie_id}】✗ 多次尝试后仍未找到滑块按钮")
+                return False
+            
+            # 查找滑块轨道 - 使用更宽松的策略
             track_selectors = [
                 '#nc_1_n1t',  # 滑块轨道ID
                 '#nc_1_wrapper',  # 主容器ID
@@ -1917,18 +1951,43 @@ class XianyuLive:
             ]
             
             track = None
-            for sel in track_selectors:
-                try:
-                    track = await iframe.query_selector(sel)
-                    if track and await track.is_visible():
-                        logger.info(f"【{self.cookie_id}】✓ 在iframe中找到滑块轨道: {sel}")
-                        break
-                except Exception as e:
-                    logger.debug(f"【{self.cookie_id}】iframe中查找轨道{sel}失败: {self._safe_str(e)}")
-                    continue
+            for retry in range(max_retries):
+                if retry > 0:
+                    logger.info(f"【{self.cookie_id}】第{retry+1}次尝试查找滑块轨道...")
+                    await asyncio.sleep(retry_delays[retry-1])
+                
+                for sel in track_selectors:
+                    try:
+                        track = await iframe.query_selector(sel)
+                        if track:
+                            # 检查元素是否可见，如果不可见也尝试等待一下
+                            try:
+                                is_visible = await track.is_visible()
+                                if is_visible:
+                                    logger.info(f"【{self.cookie_id}】✓ 在iframe中找到滑块轨道: {sel}")
+                                    break
+                                else:
+                                    logger.debug(f"【{self.cookie_id}】滑块轨道存在但不可见: {sel}")
+                                    # 等待一下再检查
+                                    await asyncio.sleep(1)
+                                    is_visible = await track.is_visible()
+                                    if is_visible:
+                                        logger.info(f"【{self.cookie_id}】✓ 等待后在iframe中找到滑块轨道: {sel}")
+                                        break
+                            except Exception as visibility_e:
+                                logger.debug(f"【{self.cookie_id}】检查滑块轨道可见性失败: {self._safe_str(visibility_e)}")
+                                # 即使可见性检查失败，也尝试使用这个元素
+                                logger.info(f"【{self.cookie_id}】✓ 在iframe中找到滑块轨道（可见性检查失败但元素存在）: {sel}")
+                                break
+                    except Exception as e:
+                        logger.debug(f"【{self.cookie_id}】iframe中查找轨道{sel}失败: {self._safe_str(e)}")
+                        continue
+                
+                if track:
+                    break
             
             if not track:
-                logger.warning(f"【{self.cookie_id}】✗ 在iframe中未找到滑块轨道")
+                logger.error(f"【{self.cookie_id}】✗ 多次尝试后仍未找到滑块轨道")
                 return False
             
             # 执行滑块拖动
@@ -1953,8 +2012,8 @@ class XianyuLive:
                 pass
 
             try:
-                await handle.wait_for_element_state('visible', timeout=3000)
-                await track.wait_for_element_state('visible', timeout=3000)
+                await handle.wait_for_element_state('visible', timeout=500)
+                await track.wait_for_element_state('visible', timeout=500)
             except Exception:
                 logger.debug(f"【{self.cookie_id}】等待元素可见超时，继续尝试获取位置")
 
@@ -1978,9 +2037,10 @@ class XianyuLive:
                 return False
 
             # 计算拖动距离 - 滑动到最大幅度
-            # 确保滑块完全滑动到轨道末端，留出2-3像素的缓冲
-            distance = max(10, box_track['width'] - box_handle['width'] - 3)
-            logger.info(f"【{self.cookie_id}】计算拖动距离: 轨道宽度={box_track['width']}, 滑块宽度={box_handle['width']}, 拖动距离={distance}")
+            # 确保滑块完全滑动到轨道末端，留出1-2像素的缓冲
+            base_distance = box_track['width'] - box_handle['width'] - 2
+            distance = max(10, base_distance)
+            logger.info(f"【{self.cookie_id}】计算拖动距离: 轨道宽度={box_track['width']}, 滑块宽度={box_handle['width']}, 基础距离={base_distance}, 最终距离={distance}")
 
             # 在 Playwright 中，bounding_box 返回的是相对于主页面视口的坐标
             # 对 iframe 内元素无需再叠加 iframe 偏移，否则会导致坐标双重偏移
@@ -1990,8 +2050,8 @@ class XianyuLive:
             logger.info(f"【{self.cookie_id}】滑块位置: ({start_x}, {start_y}), 拖动距离: {distance}")
 
             # 偏移重试序列（像素）- 确保滑动到最大幅度
-            # 优先尝试完全滑动，然后尝试稍微超出，最后尝试稍微不足
-            distance_offsets = [0, 2, -2, 5, -5]
+            # 优先尝试完全滑动，然后尝试稍微超出，确保能够滑动到最右边
+            distance_offsets = [0, 1, 2, 3, 5]
             
             # 生成更真实的人类轨迹
             def _generate_human_tracks(total_distance):
@@ -2057,7 +2117,15 @@ class XianyuLive:
             
             # 带偏移的重试拖动
             for attempt_index, offset in enumerate(distance_offsets, start=1):
+                # 计算尝试的滑动距离，确保能够滑动到最右边
                 attempt_distance = max(10, distance + offset)
+                
+                # 确保滑动距离不会太小，至少是基础距离的90%
+                min_distance = max(10, base_distance * 0.9)
+                if attempt_distance < min_distance:
+                    attempt_distance = min_distance
+                
+                logger.info(f"【{self.cookie_id}】第{attempt_index}次尝试: 偏移={offset}px, 基础距离={base_distance}px, 尝试距离={attempt_distance}px")
 
                 # 确保页面在前台，并将鼠标悬停到滑块上以激活焦点/状态
                 try:
