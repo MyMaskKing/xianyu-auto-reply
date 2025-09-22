@@ -21,6 +21,284 @@ import aiohttp
 from collections import defaultdict
 
 
+class BrowserManager:
+    """浏览器实例管理器，支持标签页管理"""
+    
+    def __init__(self):
+        self.playwright = None
+        self.browser = None
+        self.context = None
+        self.pages = {}  # 存储不同用途的页面 {tab_name: page}
+        self.is_initialized = False
+        
+    async def initialize(self, cookie_id: str):
+        """初始化浏览器实例"""
+        if self.is_initialized:
+            return True
+            
+        try:
+            import asyncio
+            from playwright.async_api import async_playwright
+            
+            # 检测Docker环境
+            is_docker = (
+                DOCKER_ENV or
+                os.getenv('DOCKER_ENV') or 
+                os.path.exists('/.dockerenv') or 
+                os.getenv('CONTAINER')
+            )
+            
+            # 安全地检查cgroup文件
+            try:
+                if os.path.exists('/proc/1/cgroup'):
+                    with open('/proc/1/cgroup', 'r') as f:
+                        cgroup_content = f.read()
+                        if 'docker' in cgroup_content:
+                            is_docker = True
+            except Exception:
+                pass
+
+            if is_docker:
+                logger.info(f"【{cookie_id}】检测到Docker/容器环境，应用asyncio修复")
+                # Docker环境处理逻辑
+                class DummyChildWatcher:
+                    def __enter__(self):
+                        return self
+                    def __exit__(self, *args):
+                        pass
+                    def is_active(self):
+                        return True
+                    def add_child_handler(self, *args, **kwargs):
+                        pass
+                    def remove_child_handler(self, *args, **kwargs):
+                        pass
+                    def attach_loop(self, *args, **kwargs):
+                        pass
+                    def close(self):
+                        pass
+                    def __del__(self):
+                        pass
+
+                class DockerEventLoopPolicy(asyncio.DefaultEventLoopPolicy):
+                    def get_child_watcher(self):
+                        return DummyChildWatcher()
+
+                old_policy = asyncio.get_event_loop_policy()
+                asyncio.set_event_loop_policy(DockerEventLoopPolicy())
+
+                try:
+                    self.playwright = await asyncio.wait_for(
+                        async_playwright().start(),
+                        timeout=30.0
+                    )
+                    logger.info(f"【{cookie_id}】Docker环境下Playwright启动成功")
+                except asyncio.TimeoutError:
+                    logger.error(f"【{cookie_id}】Docker环境下Playwright启动超时")
+                    asyncio.set_event_loop_policy(old_policy)
+                    return False
+                except Exception as e:
+                    logger.error(f"【{cookie_id}】Docker环境下Playwright启动失败: {str(e)}")
+                    asyncio.set_event_loop_policy(old_policy)
+                    return False
+                finally:
+                    asyncio.set_event_loop_policy(old_policy)
+            else:
+                try:
+                    self.playwright = await asyncio.wait_for(
+                        async_playwright().start(),
+                        timeout=30.0
+                    )
+                    logger.debug(f"【{cookie_id}】非Docker环境下Playwright启动成功")
+                except asyncio.TimeoutError:
+                    logger.error(f"【{cookie_id}】Playwright启动超时")
+                    return False
+                except Exception as e:
+                    logger.error(f"【{cookie_id}】Playwright启动失败: {str(e)}")
+                    return False
+
+            # 启动浏览器
+            browser_args = [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--no-first-run',
+                '--no-zygote',
+                '--disable-gpu',
+                '--disable-background-timer-throttling',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-renderer-backgrounding',
+                '--disable-features=TranslateUI',
+                '--disable-ipc-flooding-protection',
+                '--disable-extensions',
+                '--disable-default-apps',
+                '--disable-sync',
+                '--disable-translate',
+                '--hide-scrollbars',
+                '--mute-audio',
+                '--no-default-browser-check',
+                '--no-pings',
+                '--disable-web-security',
+                '--disable-features=VizDisplayCompositor',
+                '--disable-blink-features=AutomationControlled',
+                '--disable-features=site-per-process',
+                '--disable-site-isolation-trials',
+                '--disable-features=TranslateUI,BlinkGenPropertyTrees',
+                '--disable-background-networking',
+                '--disable-client-side-phishing-detection',
+                '--disable-component-extensions-with-background-pages',
+                '--disable-hang-monitor',
+                '--disable-ipc-flooding-protection',
+                '--disable-popup-blocking',
+                '--disable-prompt-on-repost',
+                '--disable-sync',
+                '--disable-translate',
+                '--disable-windows10-custom-titlebar',
+                '--metrics-recording-only',
+                '--safebrowsing-disable-auto-update',
+                '--enable-automation',
+                '--password-store=basic',
+                '--use-mock-keychain'
+            ]
+
+            if os.getenv('DOCKER_ENV'):
+                browser_args.extend([
+                    '--single-process',
+                    '--disable-background-networking',
+                    '--disable-client-side-phishing-detection',
+                    '--disable-hang-monitor',
+                    '--disable-popup-blocking',
+                    '--disable-prompt-on-repost',
+                    '--disable-web-resources',
+                    '--metrics-recording-only',
+                    '--safebrowsing-disable-auto-update',
+                    '--enable-automation',
+                    '--password-store=basic',
+                    '--use-mock-keychain'
+                ])
+
+            logger.info(f"【{cookie_id}】启动浏览器，headless模式: {BROWSER_HEADLESS}")
+            self.browser = await self.playwright.chromium.launch(
+                headless=BROWSER_HEADLESS,
+                args=browser_args
+            )
+
+            # 创建浏览器上下文
+            context_options = {
+                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+                'viewport': {'width': 1920, 'height': 1080},
+                'locale': 'zh-CN',
+                'timezone_id': 'Asia/Shanghai',
+                'geolocation': {'latitude': 39.9042, 'longitude': 116.4074},
+                'permissions': ['geolocation'],
+                'extra_http_headers': {
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Cache-Control': 'no-cache',
+                    'Pragma': 'no-cache',
+                    'Sec-Ch-Ua': '"Not A(Brand";v="99", "Google Chrome";v="138", "Chromium";v="138"',
+                    'Sec-Ch-Ua-Mobile': '?0',
+                    'Sec-Ch-Ua-Platform': '"Windows"',
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
+                    'Sec-Fetch-Site': 'none',
+                    'Sec-Fetch-User': '?1',
+                    'Upgrade-Insecure-Requests': '1'
+                }
+            }
+
+            self.context = await self.browser.new_context(**context_options)
+            self.is_initialized = True
+            logger.info(f"【{cookie_id}】浏览器管理器初始化完成")
+            return True
+            
+        except Exception as e:
+            logger.error(f"【{cookie_id}】浏览器管理器初始化失败: {str(e)}")
+            return False
+    
+    async def get_or_create_tab(self, tab_name: str, cookie_id: str, cookies_str: str = None):
+        """获取或创建指定名称的标签页"""
+        if not self.is_initialized:
+            await self.initialize(cookie_id)
+        
+        if tab_name in self.pages:
+            page = self.pages[tab_name]
+            if not page.is_closed():
+                return page
+            else:
+                # 页面已关闭，重新创建
+                del self.pages[tab_name]
+        
+        # 创建新页面
+        page = await self.context.new_page()
+        self.pages[tab_name] = page
+        
+        # 设置cookies
+        if cookies_str:
+            cookies = []
+            for cookie_pair in cookies_str.split('; '):
+                if '=' in cookie_pair:
+                    name, value = cookie_pair.split('=', 1)
+                    cookies.append({
+                        'name': name.strip(),
+                        'value': value.strip(),
+                        'domain': '.goofish.com',
+                        'path': '/'
+                    })
+            
+            await self.context.add_cookies(cookies)
+            logger.info(f"【{cookie_id}】已为标签页 '{tab_name}' 设置 {len(cookies)} 个Cookie")
+        
+        logger.info(f"【{cookie_id}】创建标签页: {tab_name}")
+        return page
+    
+    async def close_tab(self, tab_name: str, cookie_id: str):
+        """关闭指定名称的标签页"""
+        if tab_name in self.pages:
+            try:
+                page = self.pages[tab_name]
+                if not page.is_closed():
+                    await page.close()
+                del self.pages[tab_name]
+                logger.info(f"【{cookie_id}】已关闭标签页: {tab_name}")
+            except Exception as e:
+                logger.warning(f"【{cookie_id}】关闭标签页 '{tab_name}' 时出错: {str(e)}")
+    
+    async def close_all_tabs(self, cookie_id: str):
+        """关闭所有标签页"""
+        for tab_name in list(self.pages.keys()):
+            await self.close_tab(tab_name, cookie_id)
+        logger.info(f"【{cookie_id}】已关闭所有标签页")
+    
+    async def cleanup(self, cookie_id: str):
+        """清理浏览器资源"""
+        try:
+            # 关闭所有标签页
+            await self.close_all_tabs(cookie_id)
+            
+            # 关闭浏览器上下文
+            if self.context:
+                await self.context.close()
+                self.context = None
+            
+            # 关闭浏览器
+            if self.browser:
+                await self.browser.close()
+                self.browser = None
+            
+            # 停止playwright
+            if self.playwright:
+                await self.playwright.stop()
+                self.playwright = None
+            
+            self.is_initialized = False
+            logger.info(f"【{cookie_id}】浏览器管理器清理完成")
+            
+        except Exception as e:
+            logger.warning(f"【{cookie_id}】清理浏览器资源时出错: {str(e)}")
+
+
 class AutoReplyPauseManager:
     """自动回复暂停管理器"""
     def __init__(self):
@@ -209,7 +487,7 @@ class XianyuLive:
 
         # Cookie刷新定时任务
         self.cookie_refresh_task = None
-        self.cookie_refresh_interval = 1000000  # 1小时 = 3600秒
+        self.cookie_refresh_interval = 3600  # 1小时 = 3600秒
         self.last_cookie_refresh_time = 0
         self.cookie_refresh_running = False  # 防止重复执行Cookie刷新
         self.cookie_refresh_enabled = True  # 是否启用Cookie刷新功能
@@ -218,7 +496,8 @@ class XianyuLive:
         self.last_qr_cookie_refresh_time = 0  # 记录上次扫码登录Cookie刷新时间
         self.qr_cookie_refresh_cooldown = 600  # 扫码登录Cookie刷新后的冷却时间：10分钟
 
-
+        # 浏览器管理器实例
+        self.browser_manager = BrowserManager()
 
         # WebSocket连接监控
         self.connection_failures = 0  # 连续连接失败次数
@@ -855,8 +1134,6 @@ class XianyuLive:
                             verification_success = await self._handle_x5sec_verification_direct(verification_url)
                             if verification_success:
                                 logger.info(f"【{self.cookie_id}】x5sec验证处理成功，等待下次token刷新时重置重试计数")
-                                # 验证成功后，等待下次token刷新循环自然进行
-                                return None
                             else:
                                 logger.error(f"【{self.cookie_id}】x5sec验证处理失败")
                         except Exception as e:
@@ -895,8 +1172,6 @@ class XianyuLive:
                     verification_success = await self._handle_x5sec_verification_direct(verification_url)
                     if verification_success:
                         logger.info(f"【{self.cookie_id}】x5sec验证处理成功，等待下次token刷新时重置重试计数")
-                        # 验证成功后，等待下次token刷新循环自然进行
-                        return None
                     else:
                         logger.error(f"【{self.cookie_id}】x5sec验证处理失败")
                 except Exception as e:
@@ -943,209 +1218,18 @@ class XianyuLive:
         """直接处理x5sec验证（滑块验证码）"""
         logger.info(f"【{self.cookie_id}】开始直接处理x5sec验证: {verification_url}")
         
-        playwright = None
-        browser = None
         try:
-            import asyncio
-            from playwright.async_api import async_playwright
+            # 初始化浏览器管理器
+            if not await self.browser_manager.initialize(self.cookie_id):
+                logger.error(f"【{self.cookie_id}】浏览器管理器初始化失败")
+                return False
 
-            # 检测Docker环境
-            is_docker = (
-                DOCKER_ENV or
-                os.getenv('DOCKER_ENV') or 
-                os.path.exists('/.dockerenv') or 
-                os.getenv('CONTAINER')
+            # 获取或创建x5验证标签页
+            page = await self.browser_manager.get_or_create_tab(
+                tab_name="x5_verification",
+                cookie_id=self.cookie_id,
+                cookies_str=self.cookies_str
             )
-            
-            # 安全地检查cgroup文件
-            try:
-                if os.path.exists('/proc/1/cgroup'):
-                    with open('/proc/1/cgroup', 'r') as f:
-                        cgroup_content = f.read()
-                        if 'docker' in cgroup_content:
-                            is_docker = True
-            except Exception:
-                pass
-
-            if is_docker:
-                logger.info(f"【{self.cookie_id}】检测到Docker/容器环境，应用asyncio修复")
-                # Docker环境处理逻辑
-                class DummyChildWatcher:
-                    def __enter__(self):
-                        return self
-                    def __exit__(self, *args):
-                        pass
-                    def is_active(self):
-                        return True
-                    def add_child_handler(self, *args, **kwargs):
-                        pass
-                    def remove_child_handler(self, *args, **kwargs):
-                        pass
-                    def attach_loop(self, *args, **kwargs):
-                        pass
-                    def close(self):
-                        pass
-                    def __del__(self):
-                        pass
-
-                class DockerEventLoopPolicy(asyncio.DefaultEventLoopPolicy):
-                    def get_child_watcher(self):
-                        return DummyChildWatcher()
-
-                old_policy = asyncio.get_event_loop_policy()
-                asyncio.set_event_loop_policy(DockerEventLoopPolicy())
-
-                try:
-                    playwright = await asyncio.wait_for(
-                        async_playwright().start(),
-                        timeout=30.0
-                    )
-                    logger.info(f"【{self.cookie_id}】Docker环境下Playwright启动成功")
-                except asyncio.TimeoutError:
-                    logger.error(f"【{self.cookie_id}】Docker环境下Playwright启动超时")
-                    asyncio.set_event_loop_policy(old_policy)
-                    return False
-                except Exception as e:
-                    logger.error(f"【{self.cookie_id}】Docker环境下Playwright启动失败: {self._safe_str(e)}")
-                    asyncio.set_event_loop_policy(old_policy)
-                    return False
-                finally:
-                    asyncio.set_event_loop_policy(old_policy)
-            else:
-                try:
-                    playwright = await asyncio.wait_for(
-                        async_playwright().start(),
-                        timeout=30.0
-                    )
-                    logger.debug(f"【{self.cookie_id}】非Docker环境下Playwright启动成功")
-                except asyncio.TimeoutError:
-                    logger.error(f"【{self.cookie_id}】Playwright启动超时")
-                    return False
-                except Exception as e:
-                    logger.error(f"【{self.cookie_id}】Playwright启动失败: {self._safe_str(e)}")
-                    return False
-
-            # 启动浏览器 - 优化参数以解决空白页面问题
-            browser_args = [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--no-zygote',
-                '--disable-gpu',
-                '--disable-background-timer-throttling',
-                '--disable-backgrounding-occluded-windows',
-                '--disable-renderer-backgrounding',
-                '--disable-features=TranslateUI',
-                '--disable-ipc-flooding-protection',
-                '--disable-extensions',
-                '--disable-default-apps',
-                '--disable-sync',
-                '--disable-translate',
-                '--hide-scrollbars',
-                '--mute-audio',
-                '--no-default-browser-check',
-                '--no-pings',
-                # 添加解决空白页面的参数
-                '--disable-web-security',
-                '--disable-features=VizDisplayCompositor',
-                '--disable-blink-features=AutomationControlled',
-                '--disable-features=site-per-process',
-                '--disable-site-isolation-trials',
-                '--disable-features=TranslateUI,BlinkGenPropertyTrees',
-                '--disable-background-networking',
-                '--disable-background-timer-throttling',
-                '--disable-renderer-backgrounding',
-                '--disable-backgrounding-occluded-windows',
-                '--disable-client-side-phishing-detection',
-                '--disable-component-extensions-with-background-pages',
-                '--disable-default-apps',
-                '--disable-dev-shm-usage',
-                '--disable-extensions',
-                '--disable-features=TranslateUI',
-                '--disable-hang-monitor',
-                '--disable-ipc-flooding-protection',
-                '--disable-popup-blocking',
-                '--disable-prompt-on-repost',
-                '--disable-sync',
-                '--disable-translate',
-                '--disable-windows10-custom-titlebar',
-                '--metrics-recording-only',
-                '--no-first-run',
-                '--safebrowsing-disable-auto-update',
-                '--enable-automation',
-                '--password-store=basic',
-                '--use-mock-keychain'
-            ]
-
-            if os.getenv('DOCKER_ENV'):
-                browser_args.extend([
-                    '--single-process',
-                    '--disable-background-networking',
-                    '--disable-client-side-phishing-detection',
-                    '--disable-hang-monitor',
-                    '--disable-popup-blocking',
-                    '--disable-prompt-on-repost',
-                    '--disable-web-resources',
-                    '--metrics-recording-only',
-                    '--safebrowsing-disable-auto-update',
-                    '--enable-automation',
-                    '--password-store=basic',
-                    '--use-mock-keychain'
-                ])
-
-            logger.info(f"【{self.cookie_id}】启动浏览器，headless模式: {BROWSER_HEADLESS}")
-            browser = await playwright.chromium.launch(
-                headless=BROWSER_HEADLESS,
-                args=browser_args
-            )
-
-            # 创建浏览器上下文 - 确保环境一致性
-            context_options = {
-                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
-                'viewport': {'width': 1920, 'height': 1080},
-                'locale': 'zh-CN',
-                'timezone_id': 'Asia/Shanghai',
-                'geolocation': {'latitude': 39.9042, 'longitude': 116.4074},  # 北京坐标
-                'permissions': ['geolocation'],
-                'extra_http_headers': {
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'Cache-Control': 'no-cache',
-                    'Pragma': 'no-cache',
-                    'Sec-Ch-Ua': '"Not A(Brand";v="99", "Google Chrome";v="138", "Chromium";v="138"',
-                    'Sec-Ch-Ua-Mobile': '?0',
-                    'Sec-Ch-Ua-Platform': '"Windows"',
-                    'Sec-Fetch-Dest': 'document',
-                    'Sec-Fetch-Mode': 'navigate',
-                    'Sec-Fetch-Site': 'none',
-                    'Sec-Fetch-User': '?1',
-                    'Upgrade-Insecure-Requests': '1'
-                }
-            }
-
-            context = await browser.new_context(**context_options)
-
-            # 设置当前Cookie
-            cookies = []
-            for cookie_pair in self.cookies_str.split('; '):
-                if '=' in cookie_pair:
-                    name, value = cookie_pair.split('=', 1)
-                    cookies.append({
-                        'name': name.strip(),
-                        'value': value.strip(),
-                        'domain': '.goofish.com',
-                        'path': '/'
-                    })
-
-            await context.add_cookies(cookies)
-            logger.info(f"【{self.cookie_id}】已设置 {len(cookies)} 个Cookie到浏览器")
-
-            # 创建页面
-            page = await context.new_page()
-            await asyncio.sleep(0.1)
 
             # 访问验证页面
             logger.info(f"【{self.cookie_id}】访问x5sec验证页面: {verification_url}")
@@ -1281,7 +1365,7 @@ class XianyuLive:
                 
                 # 获取更新后的Cookie
                 logger.info(f"【{self.cookie_id}】获取验证后的Cookie...")
-                updated_cookies = await context.cookies()
+                updated_cookies = await self.browser_manager.context.cookies()
                 new_cookies_dict = {}
                 for cookie in updated_cookies:
                     new_cookies_dict[cookie['name']] = cookie['value']
@@ -1313,31 +1397,9 @@ class XianyuLive:
             logger.error(f"【{self.cookie_id}】处理x5sec验证时出错: {self._safe_str(e)}")
             return False
         finally:
-            # 确保资源清理
-            try:
-                if browser:
-                    logger.info(f"【{self.cookie_id}】开始清理浏览器资源...")
-                    try:
-                        await asyncio.wait_for(browser.close(), timeout=10.0)
-                        logger.info(f"【{self.cookie_id}】浏览器资源清理完成")
-                    except asyncio.TimeoutError:
-                        logger.warning(f"【{self.cookie_id}】浏览器关闭超时，强制清理")
-                    except Exception as browser_e:
-                        logger.warning(f"【{self.cookie_id}】浏览器关闭时出错: {self._safe_str(browser_e)}")
-                
-                if playwright:
-                    logger.info(f"【{self.cookie_id}】开始清理Playwright资源...")
-                    try:
-                        await asyncio.wait_for(playwright.stop(), timeout=10.0)
-                        logger.info(f"【{self.cookie_id}】Playwright资源清理完成")
-                    except asyncio.TimeoutError:
-                        logger.warning(f"【{self.cookie_id}】Playwright停止超时，强制清理")
-                    except Exception as playwright_e:
-                        logger.warning(f"【{self.cookie_id}】Playwright停止时出错: {self._safe_str(playwright_e)}")
-                        
-                logger.info(f"【{self.cookie_id}】所有资源清理完成")
-            except Exception as cleanup_e:
-                logger.warning(f"【{self.cookie_id}】清理浏览器资源时出错: {self._safe_str(cleanup_e)}")
+            # 注意：这里不关闭浏览器，因为可能还有其他标签页在使用
+            # 浏览器将在_refresh_cookies_via_browser方法结束时统一关闭
+            pass
 
     async def _check_verification_success(self, page):
         """检查验证是否真正成功"""
@@ -1406,7 +1468,24 @@ class XianyuLive:
                 logger.info(f"【{self.cookie_id}】✓ URL不再包含验证关键词，可能已跳转")
                 return True
             
-            # 4. 检查滑块验证状态
+            # 4. 检查滑块元素是否消失（验证通过的重要标志）
+            logger.info(f"【{self.cookie_id}】检查滑块元素是否消失...")
+            try:
+                # 检查滑块相关元素是否还存在
+                slider_handles = await page.query_selector_all('#nc_1_n1z, .nc_iconfont.btn_slide, [role="button"][aria-label="滑块"]')
+                slider_tracks = await page.query_selector_all('#nc_1_n1t, .nc_scale, .nc_wrapper')
+                slider_containers = await page.query_selector_all('#nc_1_wrapper, #nocaptcha, #nc_1_nocaptcha')
+                
+                # 如果所有滑块相关元素都不存在，说明验证通过
+                if not slider_handles and not slider_tracks and not slider_containers:
+                    logger.info(f"【{self.cookie_id}】✓ 滑块验证成功（所有滑块元素已消失）")
+                    return True
+                else:
+                    logger.info(f"【{self.cookie_id}】滑块元素仍存在: handles={len(slider_handles)}, tracks={len(slider_tracks)}, containers={len(slider_containers)}")
+            except Exception as e:
+                logger.debug(f"【{self.cookie_id}】检查滑块元素消失时出错: {self._safe_str(e)}")
+            
+            # 5. 检查滑块验证状态
             logger.info(f"【{self.cookie_id}】检查滑块验证状态...")
             try:
                 # 检查滑块是否已经滑动到最右边
@@ -1428,7 +1507,7 @@ class XianyuLive:
             except Exception as e:
                 logger.debug(f"【{self.cookie_id}】检查滑块状态时出错: {self._safe_str(e)}")
             
-            # 5. 检查是否有错误提示
+            # 6. 检查是否有错误提示
             logger.info(f"【{self.cookie_id}】检查错误提示...")
             error_indicators = [
                 '验证失败', '请重试', 'error', 'fail', '验证码错误', '验证码失败',
@@ -1448,7 +1527,7 @@ class XianyuLive:
                     logger.debug(f"【{self.cookie_id}】检查错误提示 '{indicator}' 时出错: {self._safe_str(e)}")
                     continue
             
-            # 6. 检查页面内容变化
+            # 7. 检查页面内容变化
             logger.info(f"【{self.cookie_id}】检查页面内容变化...")
             try:
                 # 检查页面中是否还有验证相关的元素
@@ -1461,7 +1540,7 @@ class XianyuLive:
             except Exception as e:
                 logger.debug(f"【{self.cookie_id}】检查页面内容变化时出错: {self._safe_str(e)}")
             
-            # 7. 默认判断
+            # 8. 默认判断
             logger.info(f"【{self.cookie_id}】未检测到明确的验证结果，假设验证成功")
             return True
             
@@ -2019,7 +2098,21 @@ class XianyuLive:
                         const hasErrorClass = cls.includes('error') || cls.includes('fail');
                         const hasErrorCode = (ncWrapper && ncWrapper.textContent.includes('e9mBi')) || document.body.textContent.includes('e9mBi');
                         const okTextStr = okText ? (okText.textContent || '') : '';
-                        return { hidden, hasSuccessClass, hasErrorClass, hasErrorCode, okText: okTextStr, okIcon: !!okIcon };
+                        
+                        // 检查滑块相关元素是否还存在
+                        const sliderHandle = document.querySelector('#nc_1_n1z, .nc_iconfont.btn_slide, [role="button"][aria-label="滑块"]');
+                        const sliderTrack = document.querySelector('#nc_1_n1t, .nc_scale, .nc_wrapper');
+                        const sliderExists = !!(sliderHandle || sliderTrack || ncWrapper);
+                        
+                        return { 
+                            hidden, 
+                            hasSuccessClass, 
+                            hasErrorClass, 
+                            hasErrorCode, 
+                            okText: okTextStr, 
+                            okIcon: !!okIcon,
+                            sliderExists: sliderExists
+                        };
                     }''')
 
                     logger.info(f"【{self.cookie_id}】滑块验证状态: {verification_status}")
@@ -2028,6 +2121,12 @@ class XianyuLive:
                         if verification_status.get('hasErrorCode') or verification_status.get('hasErrorClass'):
                             logger.error(f"【{self.cookie_id}】✗ 滑块验证失败")
                             return False
+                        
+                        # 检查滑块元素是否消失（验证通过的重要标志）
+                        if not verification_status.get('sliderExists', True):
+                            logger.info(f"【{self.cookie_id}】✓ 滑块验证成功（滑块元素已消失）")
+                            return True
+                        
                         if (verification_status.get('hasSuccessClass') or
                             verification_status.get('hidden') or
                             ('验证通过' in (verification_status.get('okText') or '')) or
@@ -5692,14 +5791,7 @@ class XianyuLive:
 
     async def _refresh_cookies_via_browser(self):
         """通过浏览器访问指定页面刷新Cookie"""
-
-
-        playwright = None
-        browser = None
         try:
-            import asyncio
-            from playwright.async_api import async_playwright
-
             # 检查是否需要等待扫码登录Cookie刷新的冷却时间
             current_time = time.time()
             time_since_qr_refresh = current_time - self.last_qr_cookie_refresh_time
@@ -5717,173 +5809,17 @@ class XianyuLive:
             logger.info(f"【{self.cookie_id}】刷新前Cookie长度: {len(self.cookies_str)}")
             logger.info(f"【{self.cookie_id}】刷新前Cookie字段数: {len(self.cookies)}")
 
-            # 检测Docker环境（多种方式）
-            is_docker = (
-                DOCKER_ENV or  # 配置文件或环境变量设置
-                os.getenv('DOCKER_ENV') or 
-                os.path.exists('/.dockerenv') or 
-                os.getenv('CONTAINER')
+            # 初始化浏览器管理器
+            if not await self.browser_manager.initialize(self.cookie_id):
+                logger.error(f"【{self.cookie_id}】浏览器管理器初始化失败")
+                return False
+
+            # 获取或创建闲鱼消息标签页
+            page = await self.browser_manager.get_or_create_tab(
+                tab_name="xianyu_messages",
+                cookie_id=self.cookie_id,
+                cookies_str=self.cookies_str
             )
-            
-            # 安全地检查cgroup文件
-            try:
-                if os.path.exists('/proc/1/cgroup'):
-                    with open('/proc/1/cgroup', 'r') as f:
-                        cgroup_content = f.read()
-                        if 'docker' in cgroup_content:
-                            is_docker = True
-            except Exception:
-                pass  # 忽略读取错误
-
-            if is_docker:
-                logger.info(f"【{self.cookie_id}】检测到Docker/容器环境，应用asyncio修复")
-
-                # 创建一个完整的虚拟子进程监视器
-                class DummyChildWatcher:
-                    def __enter__(self):
-                        return self
-                    def __exit__(self, *args):
-                        pass
-                    def is_active(self):
-                        return True
-                    def add_child_handler(self, *args, **kwargs):
-                        pass
-                    def remove_child_handler(self, *args, **kwargs):
-                        pass
-                    def attach_loop(self, *args, **kwargs):
-                        pass
-                    def close(self):
-                        pass
-                    def __del__(self):
-                        pass
-
-                # 创建自定义事件循环策略
-                class DockerEventLoopPolicy(asyncio.DefaultEventLoopPolicy):
-                    def get_child_watcher(self):
-                        return DummyChildWatcher()
-
-                # 保存当前策略并设置新策略
-                old_policy = asyncio.get_event_loop_policy()
-                asyncio.set_event_loop_policy(DockerEventLoopPolicy())
-
-                try:
-                    # 添加超时机制，避免无限等待
-                    playwright = await asyncio.wait_for(
-                        async_playwright().start(),
-                        timeout=30.0  # 30秒超时
-                    )
-                    logger.info(f"【{self.cookie_id}】Docker环境下Playwright启动成功")
-                except asyncio.TimeoutError:
-                    logger.error(f"【{self.cookie_id}】Docker环境下Playwright启动超时")
-                    asyncio.set_event_loop_policy(old_policy)
-                    return False
-                except Exception as e:
-                    logger.error(f"【{self.cookie_id}】Docker环境下Playwright启动失败: {self._safe_str(e)}")
-                    asyncio.set_event_loop_policy(old_policy)
-                    # 尝试使用更简单的启动方式
-                    try:
-                        logger.info(f"【{self.cookie_id}】尝试使用简化方式启动Playwright...")
-                        playwright = await async_playwright().start()
-                        logger.info(f"【{self.cookie_id}】简化方式启动Playwright成功")
-                    except Exception as e2:
-                        logger.error(f"【{self.cookie_id}】简化方式启动Playwright也失败: {self._safe_str(e2)}")
-                    return False
-                finally:
-                    # 恢复原策略
-                    asyncio.set_event_loop_policy(old_policy)
-            else:
-                # 非Docker环境，正常启动（也添加超时保护）
-                try:
-                    playwright = await asyncio.wait_for(
-                        async_playwright().start(),
-                        timeout=30.0  # 30秒超时
-                    )
-                    logger.debug(f"【{self.cookie_id}】非Docker环境下Playwright启动成功")
-                except asyncio.TimeoutError:
-                    logger.error(f"【{self.cookie_id}】Playwright启动超时")
-                    return False
-                except Exception as e:
-                    logger.error(f"【{self.cookie_id}】Playwright启动失败: {self._safe_str(e)}")
-                    return False
-
-            # 启动浏览器（参照商品搜索的配置）
-            browser_args = [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--no-zygote',
-                '--disable-gpu',
-                '--disable-background-timer-throttling',
-                '--disable-backgrounding-occluded-windows',
-                '--disable-renderer-backgrounding',
-                '--disable-features=TranslateUI',
-                '--disable-ipc-flooding-protection',
-                '--disable-extensions',
-                '--disable-default-apps',
-                '--disable-sync',
-                '--disable-translate',
-                '--hide-scrollbars',
-                '--mute-audio',
-                '--no-default-browser-check',
-                '--no-pings'
-            ]
-
-            # 在Docker环境中添加额外参数
-            if os.getenv('DOCKER_ENV'):
-                browser_args.extend([
-                    '--single-process',
-                    '--disable-background-networking',
-                    '--disable-client-side-phishing-detection',
-                    '--disable-hang-monitor',
-                    '--disable-popup-blocking',
-                    '--disable-prompt-on-repost',
-                    '--disable-web-resources',
-                    '--metrics-recording-only',
-                    '--safebrowsing-disable-auto-update',
-                    '--enable-automation',
-                    '--password-store=basic',
-                    '--use-mock-keychain'
-                ])
-
-            logger.info(f"【{self.cookie_id}】启动浏览器，headless模式: {BROWSER_HEADLESS}")
-            # Cookie刷新模式使用无头浏览器
-            browser = await playwright.chromium.launch(
-                headless=BROWSER_HEADLESS,
-                args=browser_args
-            )
-
-            # 创建浏览器上下文
-            context_options = {
-                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
-            }
-
-            # 使用标准窗口大小
-            context_options['viewport'] = {'width': 1920, 'height': 1080}
-
-            context = await browser.new_context(**context_options)
-
-            # 设置当前Cookie
-            cookies = []
-            for cookie_pair in self.cookies_str.split('; '):
-                if '=' in cookie_pair:
-                    name, value = cookie_pair.split('=', 1)
-                    cookies.append({
-                        'name': name.strip(),
-                        'value': value.strip(),
-                        'domain': '.goofish.com',
-                        'path': '/'
-                    })
-
-            await context.add_cookies(cookies)
-            logger.info(f"【{self.cookie_id}】已设置 {len(cookies)} 个Cookie到浏览器")
-
-            # 创建页面
-            page = await context.new_page()
-
-            # 等待页面准备
-            await asyncio.sleep(0.1)
 
             # 访问指定页面
             target_url = "https://www.goofish.com/im?spm=a21ybx.home.sidebar.1.4c053da6vYwnmf"
@@ -5949,7 +5885,7 @@ class XianyuLive:
 
             # Cookie刷新模式：正常更新Cookie
             logger.info(f"【{self.cookie_id}】获取更新后的Cookie...")
-            updated_cookies = await context.cookies()
+            updated_cookies = await self.browser_manager.context.cookies()
 
             # 构造新的Cookie字典
             new_cookies_dict = {}
@@ -6010,31 +5946,12 @@ class XianyuLive:
             logger.error(f"【{self.cookie_id}】通过浏览器刷新Cookie失败: {self._safe_str(e)}")
             return False
         finally:
-            # 确保资源清理
+            # 统一关闭浏览器实例
             try:
-                if browser:
-                    logger.info(f"【{self.cookie_id}】开始清理浏览器资源...")
-                    try:
-                        await asyncio.wait_for(browser.close(), timeout=10.0)
-                        logger.info(f"【{self.cookie_id}】浏览器资源清理完成")
-                    except asyncio.TimeoutError:
-                        logger.warning(f"【{self.cookie_id}】浏览器关闭超时，强制清理")
-                    except Exception as browser_e:
-                        logger.warning(f"【{self.cookie_id}】浏览器关闭时出错: {self._safe_str(browser_e)}")
-                
-                if playwright:
-                    logger.info(f"【{self.cookie_id}】开始清理Playwright资源...")
-                    try:
-                        await asyncio.wait_for(playwright.stop(), timeout=10.0)
-                        logger.info(f"【{self.cookie_id}】Playwright资源清理完成")
-                    except asyncio.TimeoutError:
-                        logger.warning(f"【{self.cookie_id}】Playwright停止超时，强制清理")
-                    except Exception as playwright_e:
-                        logger.warning(f"【{self.cookie_id}】Playwright停止时出错: {self._safe_str(playwright_e)}")
-                        
-                logger.info(f"【{self.cookie_id}】所有资源清理完成")
+                await self.browser_manager.cleanup(self.cookie_id)
+                logger.info(f"【{self.cookie_id}】浏览器实例已统一关闭")
             except Exception as cleanup_e:
-                logger.warning(f"【{self.cookie_id}】清理浏览器资源时出错: {self._safe_str(cleanup_e)}")
+                logger.warning(f"【{self.cookie_id}】关闭浏览器实例时出错: {self._safe_str(cleanup_e)}")
 
 
     async def send_msg_once(self, toid, item_id, text):
