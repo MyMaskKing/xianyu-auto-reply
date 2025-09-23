@@ -33,8 +33,12 @@ class BrowserManager:
         
     async def initialize(self, cookie_id: str):
         """初始化浏览器实例"""
-        if self.is_initialized:
+        # 若标记已初始化但实例缺失，则纠正并重建
+        if self.is_initialized and self.browser and self.context:
             return True
+        if self.is_initialized and (self.browser is None or self.context is None):
+            logger.warning(f"【{cookie_id}】检测到浏览器标记已初始化但实例缺失，自动重建...")
+            self.is_initialized = False
             
         try:
             import asyncio
@@ -221,6 +225,13 @@ class BrowserManager:
         """获取或创建指定名称的标签页"""
         if not self.is_initialized:
             await self.initialize(cookie_id)
+        # 二次校验，防止 context 被外部关闭导致 NoneType.new_page
+        if not self.context:
+            logger.warning(f"【{cookie_id}】浏览器上下文未就绪，正在重建...")
+            await self.initialize(cookie_id)
+            if not self.context:
+                logger.error(f"【{cookie_id}】浏览器上下文重建失败，无法创建标签页: {tab_name}")
+                raise RuntimeError("Browser context not initialized")
         
         if tab_name in self.pages:
             page = self.pages[tab_name]
