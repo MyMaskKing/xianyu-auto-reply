@@ -457,7 +457,8 @@ class XianyuLive:
         self.token_refresh_interval = TOKEN_REFRESH_INTERVAL
         self.token_retry_interval = TOKEN_RETRY_INTERVAL
         self.refresh_token_browser_retry = 0  # 通过浏览器刷新Cookie以修复token失败的重试计数
-        self.refresh_token_browser_retry_limit = 1  # 最多尝试1次
+        self.refresh_token_browser_retry_limit = 3  # 最多尝试3次
+        self.refresh_token_browser_retry_interval = 300  # 重试间隔：5分钟
         self.last_token_refresh_time = 0
         self.current_token = None
         self.token_refresh_task = None
@@ -1129,6 +1130,11 @@ class XianyuLive:
                         self.refresh_token_browser_retry += 1
                         logger.info(f"【{self.cookie_id}】Token刷新失败，尝试处理x5sec验证 (第{self.refresh_token_browser_retry}/{self.refresh_token_browser_retry_limit}次)")
                         
+                        # 如果不是第一次重试，等待重试间隔
+                        if self.refresh_token_browser_retry > 1:
+                            logger.info(f"【{self.cookie_id}】等待{self.refresh_token_browser_retry_interval}秒后进行第{self.refresh_token_browser_retry}次重试...")
+                            await asyncio.sleep(self.refresh_token_browser_retry_interval)
+                        
                         # 直接调用x5sec验证处理
                         try:
                             verification_success = await self._handle_x5sec_verification_direct(verification_url)
@@ -1169,6 +1175,11 @@ class XianyuLive:
 
                 self.refresh_token_browser_retry += 1
                 logger.info(f"【{self.cookie_id}】Token刷新异常，尝试处理x5sec验证 (第{self.refresh_token_browser_retry}/{self.refresh_token_browser_retry_limit}次)")
+                
+                # 如果不是第一次重试，等待重试间隔
+                if self.refresh_token_browser_retry > 1:
+                    logger.info(f"【{self.cookie_id}】等待{self.refresh_token_browser_retry_interval}秒后进行第{self.refresh_token_browser_retry}次重试...")
+                    await asyncio.sleep(self.refresh_token_browser_retry_interval)
                 
                 # 直接调用x5sec验证处理
                 try:

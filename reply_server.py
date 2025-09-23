@@ -2310,6 +2310,53 @@ def get_cookie_pause_duration(cid: str, current_user: Dict[str, Any] = Depends(g
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ========================= x5sec验证重试管理接口 =========================
+
+@app.post("/reset-all-x5sec-retry")
+async def reset_all_x5sec_retry():
+    """重置所有账号的x5sec验证重试次数（无需认证）"""
+    try:
+        from XianyuAutoAsync import XianyuLive
+        
+        # 获取所有活跃的实例
+        reset_count = 0
+        reset_results = []
+        
+        # 通过cookie_manager获取所有账号ID
+        if cookie_manager.manager is not None:
+            all_cookies = cookie_manager.manager.get_all_cookies()
+            for cookie_id in all_cookies.keys():
+                live_instance = XianyuLive.get_instance(cookie_id)
+                if live_instance:
+                    # 重置重试计数
+                    live_instance.refresh_token_browser_retry = 0
+                    reset_count += 1
+                    reset_results.append({
+                        "cookie_id": cookie_id,
+                        "success": True,
+                        "message": "重置成功"
+                    })
+                    logger.info(f"【{cookie_id}】x5sec验证重试次数已重置")
+                else:
+                    reset_results.append({
+                        "cookie_id": cookie_id,
+                        "success": False,
+                        "message": "实例不存在或未连接"
+                    })
+        
+        return {
+            "success": True,
+            "message": f"成功重置 {reset_count} 个账号的x5sec验证重试次数",
+            "reset_count": reset_count,
+            "results": reset_results
+        }
+        
+    except Exception as e:
+        logger.error(f"重置所有x5sec验证重试次数失败: {str(e)}")
+        return {
+            "success": False,
+            "message": f"重置失败: {str(e)}"
+        }
 
 
 class KeywordIn(BaseModel):
