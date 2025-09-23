@@ -475,6 +475,8 @@ class XianyuLive:
         self.token_refresh_task = None
         self.verification_url = None  # 存储token刷新失败时的验证URL
         self.connection_restart_flag = False  # 连接重启标志
+        self.last_ws_message_time = 0  # 最近一次收到WebSocket消息的时间
+        self.ws_watchdog_task = None  # WebSocket看门狗任务
 
         # 通知防重复机制
         self.last_notification_time = {}  # 记录每种通知类型的最后发送时间
@@ -5248,6 +5250,47 @@ class XianyuLive:
                 logger.error(f"Token刷新循环出错: {self._safe_str(e)}")
                 await asyncio.sleep(60)
 
+    async def ws_watchdog_loop(self):
+        """WebSocket看门狗：
+        - 若ws为None或已关闭：触发主循环重连（通过关闭现有ws或设置标志）
+        - 若超过静默阈值未收到任何消息：记录日志，尝试发送ping/心跳；必要时关闭ws促使重连
+        """
+        SILENCE_SECONDS = 90  # 1.5分钟无消息视为静默
+        CHECK_INTERVAL = 30
+
+        while True:
+            try:
+                await asyncio.sleep(CHECK_INTERVAL)
+                ws = self.ws
+                now = time.time()
+
+                # ws不存在或已关闭，交由主循环处理重连
+                if not ws or getattr(ws, 'closed', False):
+                    logger.warning(f"【{self.cookie_id}】WebSocket看门狗检测到连接为空或已关闭，等待主循环重连...")
+                    # 结束看门狗，主循环建立新连接时会重新创建
+                    break
+
+                # 长时间无消息
+                if self.last_ws_message_time and now - self.last_ws_message_time > SILENCE_SECONDS:
+                    logger.warning(f"【{self.cookie_id}】WebSocket {SILENCE_SECONDS}秒未收到消息，尝试发送心跳以自检...")
+                    try:
+                        # 简单发送ping帧或一条noop消息；部分websockets版本不支持ping，忽略异常
+                        if hasattr(ws, 'ping'):
+                            await ws.ping()
+                        # 若仍长时间无响应，下次检查时关闭促使重连
+                    except Exception as ping_e:
+                        logger.warning(f"【{self.cookie_id}】看门狗发送ping失败，关闭连接以促使重连: {self._safe_str(ping_e)}")
+                        try:
+                            await ws.close()
+                        except Exception:
+                            pass
+                        break
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"【{self.cookie_id}】WebSocket看门狗异常: {self._safe_str(e)}")
+                continue
+
     async def create_chat(self, ws, toid, item_id='891198795482'):
         msg = {
             "lwp": "/r/SingleChatConversation/create",
@@ -5503,7 +5546,7 @@ class XianyuLive:
             # 为整个Cookie刷新任务添加超时保护（3分钟，缩短时间减少影响）
             success = await asyncio.wait_for(
                 self._refresh_cookies_via_browser(),
-                timeout=180.0  # 3分钟超时，减少对WebSocket的影响
+                timeout=60.0  # 1分钟超时，减少对WebSocket的影响
             )
 
             # 重新启动心跳任务
@@ -6717,6 +6760,7 @@ class XianyuLive:
                         # 更新连接状态
                         self.connection_failures = 0
                         self.last_successful_connection = time.time()
+                        self.last_ws_message_time = time.time()
 
                         logger.info(f"【{self.cookie_id}】开始初始化WebSocket连接...")
                         await self.init(websocket)
@@ -6740,12 +6784,17 @@ class XianyuLive:
                             logger.info(f"【{self.cookie_id}】启动Cookie刷新任务...")
                             self.cookie_refresh_task = asyncio.create_task(self.cookie_refresh_loop())
 
+                        # 启动WebSocket看门狗：长时间无消息或ws关闭，触发重连
+                        if not self.ws_watchdog_task:
+                            self.ws_watchdog_task = asyncio.create_task(self.ws_watchdog_loop())
+
                         logger.info(f"【{self.cookie_id}】开始监听WebSocket消息...")
                         logger.info(f"【{self.cookie_id}】WebSocket连接状态正常，等待服务器消息...")
                         logger.info(f"【{self.cookie_id}】准备进入消息循环...")
 
                         async for message in websocket:
                             logger.info(f"【{self.cookie_id}】收到WebSocket消息: {len(message) if message else 0} 字节")
+                            self.last_ws_message_time = time.time()
                             try:
                                 message_data = json.loads(message)
 
@@ -6822,6 +6871,8 @@ class XianyuLive:
                 self.cleanup_task.cancel()
             if self.cookie_refresh_task:
                 self.cookie_refresh_task.cancel()
+            if self.ws_watchdog_task:
+                self.ws_watchdog_task.cancel()
             await self.close_session()  # 确保关闭session
 
             # 从全局实例字典中注销当前实例
