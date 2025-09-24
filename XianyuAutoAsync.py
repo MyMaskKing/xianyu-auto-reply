@@ -5284,6 +5284,8 @@ class XianyuLive:
                             await ws.close()
                         except Exception:
                             pass
+                        # 设置连接重启标志，促使主循环重连
+                        self.connection_restart_flag = True
                         break
             except asyncio.CancelledError:
                 break
@@ -6740,6 +6742,11 @@ class XianyuLive:
 
             while True:
                 try:
+                    # 检查连接重启标志
+                    if self.connection_restart_flag:
+                        logger.info(f"【{self.cookie_id}】检测到连接重启标志，重置标志并继续...")
+                        self.connection_restart_flag = False
+                    
                     # 检查账号是否启用
                     from cookie_manager import manager as cookie_manager
                     if cookie_manager and not cookie_manager.get_cookie_status(self.cookie_id):
@@ -6785,7 +6792,8 @@ class XianyuLive:
                             self.cookie_refresh_task = asyncio.create_task(self.cookie_refresh_loop())
 
                         # 启动WebSocket看门狗：长时间无消息或ws关闭，触发重连
-                        if not self.ws_watchdog_task:
+                        if not self.ws_watchdog_task or self.ws_watchdog_task.done():
+                            logger.info(f"【{self.cookie_id}】启动WebSocket看门狗任务...")
                             self.ws_watchdog_task = asyncio.create_task(self.ws_watchdog_loop())
 
                         logger.info(f"【{self.cookie_id}】开始监听WebSocket消息...")
@@ -6852,6 +6860,9 @@ class XianyuLive:
                     if self.cookie_refresh_task:
                         self.cookie_refresh_task.cancel()
                         self.cookie_refresh_task = None
+                    if self.ws_watchdog_task:
+                        self.ws_watchdog_task.cancel()
+                        self.ws_watchdog_task = None
 
                     logger.info(f"【{self.cookie_id}】等待 {retry_delay} 秒后重试连接...")
                     await asyncio.sleep(retry_delay)
