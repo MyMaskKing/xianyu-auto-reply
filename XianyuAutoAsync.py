@@ -5444,6 +5444,13 @@ class XianyuLive:
                 # 检查WebSocket连接状态
                 if ws.closed:
                     logger.warning(f"【{self.cookie_id}】WebSocket连接已关闭，停止心跳循环")
+                    # 主循环有时不会立刻感知关闭，这里主动触发重连
+                    try:
+                        self.connection_restart_flag = True
+                        if self.ws and not getattr(self.ws, 'closed', False):
+                            await self.ws.close()
+                    except Exception:
+                        pass
                     break
 
                 await self.send_heartbeat(ws)
