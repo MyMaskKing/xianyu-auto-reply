@@ -1158,10 +1158,17 @@ class XianyuLive:
                         except Exception as e:
                             logger.error(f"【{self.cookie_id}】处理x5sec验证时发生异常: {self._safe_str(e)}")
                         logger.info(f"【{self.cookie_id}】开始刷新Cookie...")
-                        await self._refresh_cookies_via_browser()
-                        # 验证与Cookie刷新成功后，立刻重试获取token并返回
-                        logger.info(f"【{self.cookie_id}】Cookie刷新完成，立即重试token刷新以完成注册")
-                        return await self.refresh_token()
+                        try:
+                            cookie_refresh_success = await self._refresh_cookies_via_browser()
+                            if cookie_refresh_success:
+                                logger.info(f"【{self.cookie_id}】Cookie刷新完成，立即重试token刷新以完成注册")
+                                return await self.refresh_token()
+                            else:
+                                logger.error(f"【{self.cookie_id}】Cookie刷新失败，无法继续token刷新")
+                                return None
+                        except Exception as e:
+                            logger.error(f"【{self.cookie_id}】Cookie刷新过程中发生异常: {self._safe_str(e)}")
+                            return None
                     else:
                         logger.warning(f"【{self.cookie_id}】Token刷新失败，但没有检测到验证URL")
 
