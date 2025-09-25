@@ -6780,40 +6780,50 @@ class XianyuLive:
                         await self.init(websocket)
                         logger.info(f"【{self.cookie_id}】WebSocket初始化完成！")
 
-                        # 启动心跳任务（如果不存在或已完成）
-                        if not self.heartbeat_task or self.heartbeat_task.done():
-                            logger.info(f"【{self.cookie_id}】启动心跳任务...")
-                            self.heartbeat_task = asyncio.create_task(self.heartbeat_loop(websocket))
-                        else:
-                            logger.info(f"【{self.cookie_id}】心跳任务已在运行，跳过启动")
+                        # 强制重启心跳任务（重连后必须重启）
+                        if self.heartbeat_task:
+                            self.heartbeat_task.cancel()
+                            self.heartbeat_task = None
+                            logger.info(f"【{self.cookie_id}】取消旧的心跳任务")
+                        
+                        logger.info(f"【{self.cookie_id}】启动心跳任务...")
+                        self.heartbeat_task = asyncio.create_task(self.heartbeat_loop(websocket))
 
-                        # 启动token刷新任务（如果不存在或已完成）
-                        if not self.token_refresh_task or self.token_refresh_task.done():
-                            logger.info(f"【{self.cookie_id}】启动token刷新任务...")
-                            self.token_refresh_task = asyncio.create_task(self.token_refresh_loop())
-                        else:
-                            logger.info(f"【{self.cookie_id}】token刷新任务已在运行，跳过启动")
+                        # 强制重启token刷新任务（重连后必须重启）
+                        if self.token_refresh_task:
+                            self.token_refresh_task.cancel()
+                            self.token_refresh_task = None
+                            logger.info(f"【{self.cookie_id}】取消旧的token刷新任务")
+                        
+                        logger.info(f"【{self.cookie_id}】启动token刷新任务...")
+                        self.token_refresh_task = asyncio.create_task(self.token_refresh_loop())
 
-                        # 启动暂停记录清理任务（如果不存在或已完成）
-                        if not self.cleanup_task or self.cleanup_task.done():
-                            logger.info(f"【{self.cookie_id}】启动暂停记录清理任务...")
-                            self.cleanup_task = asyncio.create_task(self.pause_cleanup_loop())
-                        else:
-                            logger.info(f"【{self.cookie_id}】暂停记录清理任务已在运行，跳过启动")
+                        # 强制重启暂停记录清理任务（重连后必须重启）
+                        if self.cleanup_task:
+                            self.cleanup_task.cancel()
+                            self.cleanup_task = None
+                            logger.info(f"【{self.cookie_id}】取消旧的清理任务")
+                        
+                        logger.info(f"【{self.cookie_id}】启动暂停记录清理任务...")
+                        self.cleanup_task = asyncio.create_task(self.pause_cleanup_loop())
 
-                        # 启动Cookie刷新任务（如果不存在或已完成）
-                        if not self.cookie_refresh_task or self.cookie_refresh_task.done():
-                            logger.info(f"【{self.cookie_id}】启动Cookie刷新任务...")
-                            self.cookie_refresh_task = asyncio.create_task(self.cookie_refresh_loop())
-                        else:
-                            logger.info(f"【{self.cookie_id}】Cookie刷新任务已在运行，跳过启动")
+                        # 强制重启Cookie刷新任务（重连后必须重启）
+                        if self.cookie_refresh_task:
+                            self.cookie_refresh_task.cancel()
+                            self.cookie_refresh_task = None
+                            logger.info(f"【{self.cookie_id}】取消旧的Cookie刷新任务")
+                        
+                        logger.info(f"【{self.cookie_id}】启动Cookie刷新任务...")
+                        self.cookie_refresh_task = asyncio.create_task(self.cookie_refresh_loop())
 
-                        # 启动WebSocket看门狗：长时间无消息或ws关闭，触发重连
-                        if not self.ws_watchdog_task or self.ws_watchdog_task.done():
-                            logger.info(f"【{self.cookie_id}】启动WebSocket看门狗任务...")
-                            self.ws_watchdog_task = asyncio.create_task(self.ws_watchdog_loop())
-                        else:
-                            logger.info(f"【{self.cookie_id}】WebSocket看门狗任务已在运行，跳过启动")
+                        # 强制重启WebSocket看门狗任务（重连后必须重启）
+                        if self.ws_watchdog_task:
+                            self.ws_watchdog_task.cancel()
+                            self.ws_watchdog_task = None
+                            logger.info(f"【{self.cookie_id}】取消旧的看门狗任务")
+                        
+                        logger.info(f"【{self.cookie_id}】启动WebSocket看门狗任务...")
+                        self.ws_watchdog_task = asyncio.create_task(self.ws_watchdog_loop())
 
                         logger.info(f"【{self.cookie_id}】开始监听WebSocket消息...")
                         logger.info(f"【{self.cookie_id}】WebSocket连接状态正常，等待服务器消息...")
