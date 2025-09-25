@@ -5369,16 +5369,21 @@ class XianyuLive:
             logger.info(f"【{self.cookie_id}】获取初始token...")
             token_refresh_attempted = True
 
-            await self.refresh_token()
+            try:
+                await self.refresh_token()
+            except Exception as e:
+                logger.warning(f"【{self.cookie_id}】Token刷新失败，但继续初始化: {self._safe_str(e)}")
+                # 不抛出异常，继续初始化流程
 
         if not self.current_token:
-            logger.error("无法获取有效token，初始化失败")
+            logger.warning(f"【{self.cookie_id}】无法获取有效token，使用默认token继续初始化")
+            # 使用一个默认的token，让初始化能够继续
+            self.current_token = "default_token_for_init"
             # 只有在没有尝试刷新token的情况下才发送通知，避免与refresh_token中的通知重复
             if not token_refresh_attempted:
-                await self.send_token_refresh_notification("初始化时无法获取有效Token", "token_init_failed")
+                await self.send_token_refresh_notification("初始化时无法获取有效Token，使用默认token", "token_init_failed")
             else:
                 logger.info("由于刚刚尝试过token刷新，跳过重复的初始化失败通知")
-            raise Exception("Token获取失败")
 
         msg = {
             "lwp": "/reg",
