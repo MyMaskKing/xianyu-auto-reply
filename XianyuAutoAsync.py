@@ -5456,13 +5456,8 @@ class XianyuLive:
                 # 检查WebSocket连接状态
                 if ws.closed:
                     logger.warning(f"【{self.cookie_id}】WebSocket连接已关闭，停止心跳循环")
-                    # 主循环有时不会立刻感知关闭，这里主动触发重连
-                    try:
-                        self.connection_restart_flag = True
-                        if self.ws and not getattr(self.ws, 'closed', False):
-                            await self.ws.close()
-                    except Exception:
-                        pass
+                    # 设置重连标志，让主循环知道需要重连
+                    self.connection_restart_flag = True
                     break
 
                 await self.send_heartbeat(ws)
@@ -5475,7 +5470,8 @@ class XianyuLive:
                 logger.error(f"心跳发送失败 ({consecutive_failures}/{max_failures}): {self._safe_str(e)}")
 
                 if consecutive_failures >= max_failures:
-                    logger.error(f"【{self.cookie_id}】心跳连续失败{max_failures}次，停止心跳循环")
+                    logger.error(f"【{self.cookie_id}】心跳连续失败{max_failures}次，设置重连标志")
+                    self.connection_restart_flag = True
                     break
 
                 # 失败后短暂等待再重试
@@ -6763,8 +6759,45 @@ class XianyuLive:
                 try:
                     # 检查连接重启标志
                     if self.connection_restart_flag:
-                        logger.info(f"【{self.cookie_id}】检测到连接重启标志，重置标志并继续...")
+                        logger.info(f"【{self.cookie_id}】检测到连接重启标志，清理旧连接并准备重连...")
                         self.connection_restart_flag = False
+                        
+                        # 清理所有任务
+                        if self.heartbeat_task:
+                            self.heartbeat_task.cancel()
+                            self.heartbeat_task = None
+                            logger.info(f"【{self.cookie_id}】取消旧的心跳任务")
+                        if self.token_refresh_task:
+                            self.token_refresh_task.cancel()
+                            self.token_refresh_task = None
+                            logger.info(f"【{self.cookie_id}】取消旧的token刷新任务")
+                        if self.cleanup_task:
+                            self.cleanup_task.cancel()
+                            self.cleanup_task = None
+                            logger.info(f"【{self.cookie_id}】取消旧的清理任务")
+                        if self.cookie_refresh_task:
+                            self.cookie_refresh_task.cancel()
+                            self.cookie_refresh_task = None
+                            logger.info(f"【{self.cookie_id}】取消旧的Cookie刷新任务")
+                        if self.ws_watchdog_task:
+                            self.ws_watchdog_task.cancel()
+                            self.ws_watchdog_task = None
+                            logger.info(f"【{self.cookie_id}】取消旧的看门狗任务")
+                        
+                        # 清空当前token，确保重新连接时会重新获取
+                        if self.current_token:
+                            logger.info(f"【{self.cookie_id}】清空当前token，重新连接时将重新获取")
+                            self.current_token = None
+                        
+                        # 关闭旧的WebSocket连接
+                        if self.ws and not getattr(self.ws, 'closed', False):
+                            try:
+                                await self.ws.close()
+                                logger.info(f"【{self.cookie_id}】已关闭旧的WebSocket连接")
+                            except Exception as e:
+                                logger.debug(f"关闭旧WebSocket连接时出错: {self._safe_str(e)}")
+                        
+                        logger.info(f"【{self.cookie_id}】旧连接清理完成，准备重新建立连接...")
                     
                     # 检查账号是否启用
                     from cookie_manager import manager as cookie_manager
@@ -6842,6 +6875,12 @@ class XianyuLive:
                         logger.info(f"【{self.cookie_id}】准备进入消息循环...")
 
                         async for message in websocket:
+                            # 检查心跳任务状态，如果心跳任务已结束则设置重连标志
+                            if self.heartbeat_task and self.heartbeat_task.done():
+                                logger.warning(f"【{self.cookie_id}】检测到心跳任务已结束，设置重连标志")
+                                self.connection_restart_flag = True
+                                break
+                            
                             logger.info(f"【{self.cookie_id}】收到WebSocket消息: {len(message) if message else 0} 字节")
                             self.last_ws_message_time = time.time()
                             try:
@@ -6858,6 +6897,11 @@ class XianyuLive:
                             except Exception as e:
                                 logger.error(f"处理消息出错: {self._safe_str(e)}")
                                 continue
+                        
+                        # 消息循环结束后，检查是否需要重连
+                        if self.connection_restart_flag:
+                            logger.info(f"【{self.cookie_id}】消息循环结束，检测到重连标志，准备重连...")
+                            continue
 
                 except Exception as e:
                     error_msg = self._safe_str(e)
