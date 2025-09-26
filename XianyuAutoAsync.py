@@ -5233,23 +5233,36 @@ class XianyuLive:
                 current_time = time.time()
                 if current_time - self.last_token_refresh_time >= self.token_refresh_interval:
                     logger.info("Token即将过期，准备刷新...")
-                    new_token = await self.refresh_token()
-                    if new_token:
+                    
+                    # 将token刷新移到后台任务，避免阻塞
+                    logger.info(f"【{self.cookie_id}】启动后台token刷新任务...")
+                    asyncio.create_task(self._background_token_refresh_with_restart())
+                    
+                    # 等待token刷新完成，最多等待5分钟
+                    async def on_success():
                         logger.info(f"【{self.cookie_id}】Token刷新成功，准备重启实例...")
-                        # 注意：refresh_token方法中已经调用了_restart_instance()
-                        # 这里只需要关闭当前连接，让main循环重新开始
                         self.connection_restart_flag = True
                         if self.ws:
                             await self.ws.close()
-                        break
-                    else:
-                        logger.error(f"【{self.cookie_id}】Token刷新失败，将在{self.token_retry_interval // 60}分钟后重试")
-
+                    
+                    async def on_timeout():
+                        logger.error(f"【{self.cookie_id}】Token刷新超时，将在{self.token_retry_interval // 60}分钟后重试")
                         # 清空当前token，确保下次重试时重新获取
                         self.current_token = None
-
                         # 发送Token刷新失败通知
-                        await self.send_token_refresh_notification("Token定时刷新失败，将自动重试", "token_scheduled_refresh_failed")
+                        await self.send_token_refresh_notification("Token定时刷新超时，将自动重试", "token_scheduled_refresh_timeout")
+                    
+                    success = await self._wait_for_token_refresh(
+                        max_wait_time=300,  # 5分钟
+                        check_interval=2,   # 每2秒检查一次
+                        on_success=on_success,
+                        on_timeout=on_timeout,
+                        log_prefix="定时刷新时"
+                    )
+                    
+                    if success:
+                        break
+                    else:
                         await asyncio.sleep(self.token_retry_interval)
                         continue
                 await asyncio.sleep(60)
@@ -5377,7 +5390,22 @@ class XianyuLive:
             token_refresh_attempted = True
 
             try:
-                await self.refresh_token()
+                # 将token刷新移到后台任务，避免阻塞WebSocket连接
+                logger.info(f"【{self.cookie_id}】启动后台token刷新任务...")
+                asyncio.create_task(self._background_refresh_token())
+                
+                # 等待后台token刷新完成，因为需要x5sec验证和滚动条验证等过程（最多等待5分钟）
+                async def on_timeout():
+                    logger.info(f"【{self.cookie_id}】后台token刷新未完成，使用默认token继续初始化")
+                    self.current_token = "default_token_for_init"
+                
+                await self._wait_for_token_refresh(
+                    max_wait_time=300,  # 5分钟，因为需要x5sec验证和滚动条验证
+                    check_interval=2,   # 每2秒检查一次
+                    on_timeout=on_timeout,
+                    log_prefix="初始化时"
+                )
+                    
             except Exception as e:
                 logger.warning(f"【{self.cookie_id}】Token刷新失败，但继续初始化: {self._safe_str(e)}")
                 # 不抛出异常，继续初始化流程
@@ -5426,7 +5454,74 @@ class XianyuLive:
             ]
         }
         await ws.send(json.dumps(msg))
+        
+        # 检查WebSocket连接状态，如果连接断开则记录警告
+        if ws.closed:
+            logger.warning(f"【{self.cookie_id}】初始化完成时WebSocket连接已断开")
+            return
+            
         logger.info(f'【{self.cookie_id}】连接注册完成')
+
+    async def _wait_for_token_refresh(self, max_wait_time: int, check_interval: int = 1, 
+                                    on_success=None, on_timeout=None, log_prefix: str = ""):
+        """等待token刷新完成的通用函数"""
+        logger.info(f"【{self.cookie_id}】{log_prefix}等待后台token刷新，最多等待{max_wait_time}秒...")
+        waited_time = 0
+        
+        while waited_time < max_wait_time:
+            await asyncio.sleep(check_interval)
+            waited_time += check_interval
+            
+            # 检查是否有新的token
+            if self.current_token and self.current_token != "default_token_for_init":
+                logger.info(f"【{self.cookie_id}】{log_prefix}后台token刷新完成，使用真实token")
+                if on_success:
+                    await on_success()
+                return True
+            
+            # 检查是否设置了重启标志（后台任务可能已经设置了）
+            if self.connection_restart_flag:
+                logger.info(f"【{self.cookie_id}】{log_prefix}检测到重启标志")
+                if on_success:
+                    await on_success()
+                return True
+        
+        # 如果等待超时
+        logger.warning(f"【{self.cookie_id}】{log_prefix}后台token刷新超时")
+        if on_timeout:
+            await on_timeout()
+        return False
+
+    async def _background_refresh_token(self):
+        """后台token刷新任务，避免阻塞WebSocket连接"""
+        try:
+            logger.info(f"【{self.cookie_id}】后台token刷新任务开始...")
+            new_token = await self.refresh_token()
+            if new_token:
+                # 更新当前token
+                self.current_token = new_token
+                self.last_token_refresh_time = time.time()
+                logger.info(f"【{self.cookie_id}】后台token刷新任务完成，token已更新")
+            else:
+                logger.warning(f"【{self.cookie_id}】后台token刷新任务完成，但未获取到新token")
+        except Exception as e:
+            logger.error(f"【{self.cookie_id}】后台token刷新任务失败: {self._safe_str(e)}")
+
+    async def _background_token_refresh_with_restart(self):
+        """后台token刷新任务，刷新成功后设置重启标志"""
+        try:
+            logger.info(f"【{self.cookie_id}】后台token刷新任务开始...")
+            new_token = await self.refresh_token()
+            if new_token:
+                # 更新当前token
+                self.current_token = new_token
+                self.last_token_refresh_time = time.time()
+                logger.info(f"【{self.cookie_id}】后台token刷新成功，设置重启标志")
+                self.connection_restart_flag = True
+            else:
+                logger.error(f"【{self.cookie_id}】后台token刷新失败")
+        except Exception as e:
+            logger.error(f"【{self.cookie_id}】后台token刷新任务失败: {self._safe_str(e)}")
 
     async def send_heartbeat(self, ws):
         """发送心跳包"""
