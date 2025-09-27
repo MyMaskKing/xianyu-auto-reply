@@ -2331,13 +2331,15 @@ async def reset_all_x5sec_retry():
             if live_instance:
                 # 重置重试计数
                 live_instance.refresh_token_browser_retry = 0
+                # 重置实例重新创建重试计数
+                live_instance.instance_recreation_retry = 0
                 reset_count += 1
                 reset_results.append({
                     "cookie_id": cookie_id,
                     "success": True,
                     "message": "重置成功"
                 })
-                logger.info(f"【{cookie_id}】x5sec验证重试次数已重置")
+                logger.info(f"【{cookie_id}】x5sec验证重试次数和实例重新创建重试次数已重置")
             else:
                 reset_results.append({
                     "cookie_id": cookie_id,
@@ -2347,7 +2349,7 @@ async def reset_all_x5sec_retry():
         
         return {
             "success": True,
-            "message": f"成功重置 {reset_count} 个账号的x5sec验证重试次数",
+            "message": f"成功重置 {reset_count} 个账号的x5sec验证重试次数和实例重新创建重试次数",
             "reset_count": reset_count,
             "results": reset_results
         }
