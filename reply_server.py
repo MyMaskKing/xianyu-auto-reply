@@ -2312,6 +2312,7 @@ def get_cookie_pause_duration(cid: str, current_user: Dict[str, Any] = Depends(g
 
 # ========================= x5sec验证重试管理接口 =========================
 
+@app.get("/reset-all-x5sec-retry")
 @app.post("/reset-all-x5sec-retry")
 async def reset_all_x5sec_retry():
     """重置所有账号的x5sec验证重试次数（无需认证）"""
@@ -2322,27 +2323,27 @@ async def reset_all_x5sec_retry():
         reset_count = 0
         reset_results = []
         
-        # 通过cookie_manager获取所有账号ID
-        if cookie_manager.manager is not None:
-            all_cookies = cookie_manager.manager.get_all_cookies()
-            for cookie_id in all_cookies.keys():
-                live_instance = XianyuLive.get_instance(cookie_id)
-                if live_instance:
-                    # 重置重试计数
-                    live_instance.refresh_token_browser_retry = 0
-                    reset_count += 1
-                    reset_results.append({
-                        "cookie_id": cookie_id,
-                        "success": True,
-                        "message": "重置成功"
-                    })
-                    logger.info(f"【{cookie_id}】x5sec验证重试次数已重置")
-                else:
-                    reset_results.append({
-                        "cookie_id": cookie_id,
-                        "success": False,
-                        "message": "实例不存在或未连接"
-                    })
+        # 通过db_manager获取所有账号ID
+        from db_manager import db_manager
+        all_cookies = db_manager.get_all_cookies()
+        for cookie_id in all_cookies.keys():
+            live_instance = XianyuLive.get_instance(cookie_id)
+            if live_instance:
+                # 重置重试计数
+                live_instance.refresh_token_browser_retry = 0
+                reset_count += 1
+                reset_results.append({
+                    "cookie_id": cookie_id,
+                    "success": True,
+                    "message": "重置成功"
+                })
+                logger.info(f"【{cookie_id}】x5sec验证重试次数已重置")
+            else:
+                reset_results.append({
+                    "cookie_id": cookie_id,
+                    "success": False,
+                    "message": "实例不存在或未连接"
+                })
         
         return {
             "success": True,
