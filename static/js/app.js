@@ -1499,6 +1499,51 @@ async function resetCooldownTime(cookieId) {
     }
 }
 
+// 重置所有账号的x5sec验证重试次数
+async function resetAllX5secRetry() {
+    if (!confirm('确定要重置所有账号的x5sec验证重试次数吗？')) {
+        return;
+    }
+
+    try {
+        showToast('正在重置x5sec验证重试次数...', 'info');
+        
+        const response = await fetch(`${apiBase}/reset-all-x5sec-retry`, {
+            method: 'GET',
+            headers: {
+                'Authorization': `Bearer ${authToken}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            const message = result.message || '重置成功';
+            showToast(message, 'success');
+            
+            // 如果有详细结果，显示更多信息
+            if (result.results && result.results.length > 0) {
+                const successCount = result.results.filter(r => r.success).length;
+                const failCount = result.results.length - successCount;
+                console.log(`重置结果: 成功 ${successCount} 个，失败 ${failCount} 个`);
+                
+                // 显示详细结果
+                if (failCount > 0) {
+                    const failedAccounts = result.results.filter(r => !r.success).map(r => r.cookie_id).join(', ');
+                    showToast(`部分账号重置失败: ${failedAccounts}`, 'warning');
+                }
+            }
+        } else {
+            showToast(`重置失败: ${result.message}`, 'danger');
+        }
+
+    } catch (error) {
+        console.error('重置x5sec验证重试次数失败:', error);
+        showToast(`重置失败: ${error.message || '未知错误'}`, 'danger');
+    }
+}
+
 // 删除Cookie
 async function delCookie(id) {
     if (!confirm(`确定要删除账号 "${id}" 吗？此操作不可恢复。`)) return;

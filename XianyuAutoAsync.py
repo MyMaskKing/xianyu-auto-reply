@@ -4341,7 +4341,7 @@ class XianyuLive:
 
 请检查账号Cookie是否过期，如有需要请及时更新Cookie配置。"""
 
-            logger.info(f"准备发送Token刷新异常通知: {self.cookie_id}")
+            logger.info(f"准备发送Token刷新异常通知: {self.cookie_id}，内容：{notification_msg}")
 
             # 发送通知到各个渠道
             notification_sent = False
@@ -4400,7 +4400,7 @@ class XianyuLive:
                     cooldown_desc = f"{self.notification_cooldown // 60}分钟"
 
                 next_send_time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(next_send_time))
-                logger.info(f"Token刷新通知已发送，下次可发送时间: {next_send_time_str} (冷却时间: {cooldown_desc})")
+                logger.info(f"Token【{notification_type}】刷新通知已发送，下次可发送时间: {next_send_time_str} (冷却时间: {cooldown_desc})")
 
         except Exception as e:
             logger.error(f"处理Token刷新通知失败: {self._safe_str(e)}")
@@ -5624,6 +5624,7 @@ class XianyuLive:
 
                 current_time = time.time()
                 if current_time - self.last_cookie_refresh_time >= self.cookie_refresh_interval:
+                    self.refresh_token_browser_retry = 0
                     # 检查是否已有Cookie刷新任务在执行
                     if self.cookie_refresh_running:
                         logger.debug(f"【{self.cookie_id}】Cookie刷新任务已在执行中，跳过本次触发")
