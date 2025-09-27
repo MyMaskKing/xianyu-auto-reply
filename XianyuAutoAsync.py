@@ -470,6 +470,11 @@ class XianyuLive:
         self.refresh_token_browser_retry = 0  # 通过浏览器刷新Cookie以修复token失败的重试计数
         self.refresh_token_browser_retry_limit = 3  # 最多尝试3次
         self.refresh_token_browser_retry_interval = 300  # 重试间隔：5分钟
+        
+        # 实例重新创建相关配置
+        self.instance_recreation_retry = 0  # 实例重新创建的重试计数
+        self.instance_recreation_retry_limit = 3  # 最多尝试3次
+        self.instance_recreation_retry_interval = 60  # 重试间隔：1分钟
         self.last_token_refresh_time = 0
         self.current_token = None
         self.token_refresh_task = None
@@ -1118,6 +1123,11 @@ class XianyuLive:
                                 if self.refresh_token_browser_retry > 0:
                                     logger.info(f"【{self.cookie_id}】Token刷新成功，重置浏览器刷新重试计数 (之前重试了{self.refresh_token_browser_retry}次)")
                                     self.refresh_token_browser_retry = 0
+                                
+                                # Token刷新成功，重置实例重新创建重试计数
+                                if self.instance_recreation_retry > 0:
+                                    logger.info(f"【{self.cookie_id}】Token刷新成功，重置实例重新创建重试计数 (之前重试了{self.instance_recreation_retry}次)")
+                                    self.instance_recreation_retry = 0
 
                                 logger.info(f"【{self.cookie_id}】Token刷新成功")
                                 # 不在此处重启实例，避免主循环与重启产生竞态导致循环重启
@@ -1171,6 +1181,31 @@ class XianyuLive:
                             return None
                     else:
                         logger.warning(f"【{self.cookie_id}】Token刷新失败，但没有检测到验证URL")
+                        
+                        # 检查是否需要重新创建实例
+                        if self.instance_recreation_retry >= self.instance_recreation_retry_limit:
+                            logger.error(f"【{self.cookie_id}】实例重新创建已达到上限({self.instance_recreation_retry_limit})，停止重试")
+                            await self.send_token_refresh_notification("Token刷新失败且实例重新创建已达到上限，已停止重试", "instance_recreation_exhausted")
+                            return None
+                        
+                        self.instance_recreation_retry += 1
+                        logger.info(f"【{self.cookie_id}】Token刷新失败且无验证URL，尝试重新创建实例 (第{self.instance_recreation_retry}/{self.instance_recreation_retry_limit}次)")
+                        
+                        # 如果不是第一次重试，等待重试间隔
+                        if self.instance_recreation_retry > 1:
+                            logger.info(f"【{self.cookie_id}】等待 {self.instance_recreation_retry_interval} 秒后重新创建实例...")
+                            await asyncio.sleep(self.instance_recreation_retry_interval)
+                        
+                        # 重新创建实例
+                        try:
+                            await self._recreate_instance()
+                            logger.info(f"【{self.cookie_id}】实例重新创建完成，等待下次token刷新时重置重试计数")
+                        except Exception as e:
+                            logger.error(f"【{self.cookie_id}】重新创建实例失败: {self._safe_str(e)}")
+                        
+                        # 发送Token刷新失败通知
+                        await self.send_token_refresh_notification(f"Token刷新失败，已尝试重新创建实例 (第{self.instance_recreation_retry}次): {res_json}", "token_refresh_failed_with_recreation")
+                        return None
 
                     # 发送Token刷新失败通知
                     await self.send_token_refresh_notification(f"Token刷新失败: {res_json}", "token_refresh_failed")
@@ -2826,6 +2861,72 @@ class XianyuLive:
             logger.error(f"【{self.cookie_id}】重启实例失败: {self._safe_str(e)}")
             # 发送重启失败通知
             await self.send_token_refresh_notification(f"实例重启失败: {str(e)}", "instance_restart_failed")
+
+    async def _recreate_instance(self):
+        """重新创建XianyuLive实例"""
+        try:
+            logger.info(f"【{self.cookie_id}】开始重新创建实例...")
+
+            # 导入CookieManager
+            from cookie_manager import manager as cookie_manager
+
+            if cookie_manager:
+                # 通过CookieManager重新创建实例
+                logger.info(f"【{self.cookie_id}】通过CookieManager重新创建实例...")
+
+                # 使用非阻塞方式重新创建实例
+                def recreate_task():
+                    try:
+                        # 获取原有的user_id和关键词
+                        from db_manager import db_manager
+                        original_user_id = None
+                        original_keywords = []
+                        original_status = True
+
+                        cookie_info = db_manager.get_cookie_details(self.cookie_id)
+                        if cookie_info:
+                            original_user_id = cookie_info.get('user_id')
+
+                        # 保存原有的关键词和状态
+                        if self.cookie_id in cookie_manager.keywords:
+                            original_keywords = cookie_manager.keywords[self.cookie_id].copy()
+                        if self.cookie_id in cookie_manager.cookie_status:
+                            original_status = cookie_manager.cookie_status[self.cookie_id]
+
+                        # 先移除任务（但不删除数据库记录）
+                        task = cookie_manager.tasks.pop(self.cookie_id, None)
+                        if task:
+                            task.cancel()
+
+                        # 更新Cookie值（保持原有user_id，不删除关键词）
+                        cookie_manager.cookies[self.cookie_id] = self.cookies_str
+                        db_manager.save_cookie(self.cookie_id, self.cookies_str, original_user_id)
+
+                        # 恢复关键词和状态
+                        cookie_manager.keywords[self.cookie_id] = original_keywords
+                        cookie_manager.cookie_status[self.cookie_id] = original_status
+
+                        # 重新启动任务
+                        task = cookie_manager.loop.create_task(cookie_manager._run_xianyu(self.cookie_id, self.cookies_str, original_user_id))
+                        cookie_manager.tasks[self.cookie_id] = task
+
+                        logger.info(f"【{self.cookie_id}】实例重新创建完成 (用户ID: {original_user_id}, 关键词: {len(original_keywords)}条)")
+                    except Exception as e:
+                        logger.error(f"【{self.cookie_id}】重新创建实例失败: {e}")
+
+                # 在后台执行重新创建任务
+                import threading
+                recreate_thread = threading.Thread(target=recreate_task, daemon=True)
+                recreate_thread.start()
+
+                logger.info(f"【{self.cookie_id}】实例重新创建已在后台执行")
+            else:
+                logger.warning(f"【{self.cookie_id}】CookieManager不可用，无法重新创建实例")
+
+        except Exception as e:
+            logger.error(f"【{self.cookie_id}】重新创建实例失败: {self._safe_str(e)}")
+            # 发送重新创建失败通知
+            await self.send_token_refresh_notification(f"实例重新创建失败: {str(e)}", "instance_recreation_failed")
 
     async def save_item_info_to_db(self, item_id: str, item_detail: str = None, item_title: str = None):
         """保存商品信息到数据库

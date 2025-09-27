@@ -1499,14 +1499,14 @@ async function resetCooldownTime(cookieId) {
     }
 }
 
-// 重置所有账号的x5sec验证重试次数
+// 重置所有账号的重试次数
 async function resetAllX5secRetry() {
-    if (!confirm('确定要重置所有账号的x5sec验证重试次数吗？')) {
+    if (!confirm('确定要重置所有账号的x5sec验证重试次数和实例重新创建重试次数吗？')) {
         return;
     }
 
     try {
-        showToast('正在重置x5sec验证重试次数...', 'info');
+        showToast('正在重置重试次数...', 'info');
         
         const response = await fetch(`${apiBase}/reset-all-x5sec-retry`, {
             method: 'GET',
@@ -1539,7 +1539,7 @@ async function resetAllX5secRetry() {
         }
 
     } catch (error) {
-        console.error('重置x5sec验证重试次数失败:', error);
+        console.error('重置重试次数失败:', error);
         showToast(`重置失败: ${error.message || '未知错误'}`, 'danger');
     }
 }
