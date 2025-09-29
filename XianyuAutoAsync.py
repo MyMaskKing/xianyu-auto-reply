@@ -483,6 +483,10 @@ class XianyuLive:
         self.last_ws_message_time = 0  # 最近一次收到WebSocket消息的时间
         self.ws_watchdog_task = None  # WebSocket看门狗任务
 
+        # 关键操作保护（例如自动发货期间，避免中断）
+        self.critical_idle_event = asyncio.Event()
+        self.critical_idle_event.set()  # 初始为空闲
+
         # 通知防重复机制
         self.last_notification_time = {}  # 记录每种通知类型的最后发送时间
         self.notification_cooldown = 300  # 5分钟内不重复发送相同类型的通知
@@ -558,6 +562,17 @@ class XianyuLive:
     def get_instance_count(cls):
         """获取当前活跃实例数量"""
         return len(cls._instances)
+
+    async def _wait_critical_idle(self, max_wait_seconds: int = 30) -> bool:
+        """等待关键操作完成（例如自动发货），最多等待指定秒数。
+        返回True表示已空闲或等待成功，False表示等待超时。"""
+        try:
+            if self.critical_idle_event.is_set():
+                return True
+            await asyncio.wait_for(self.critical_idle_event.wait(), timeout=max_wait_seconds)
+            return True
+        except Exception:
+            return False
 
     def is_auto_confirm_enabled(self) -> bool:
         """检查当前账号是否启用自动确认发货"""
@@ -825,6 +840,8 @@ class XianyuLive:
                                    item_id: str, chat_id: str, msg_time: str):
         """统一处理自动发货逻辑"""
         try:
+            # 标记进入关键操作，避免被中断
+            self.critical_idle_event.clear()
             # 检查商品是否属于当前cookies
             if item_id and item_id != "未知商品":
                 try:
@@ -1021,6 +1038,9 @@ class XianyuLive:
 
         except Exception as e:
             logger.error(f"统一自动发货处理异常: {self._safe_str(e)}")
+        finally:
+            # 关键操作结束
+            self.critical_idle_event.set()
 
 
 
@@ -5335,6 +5355,9 @@ class XianyuLive:
                 if current_time - self.last_token_refresh_time >= self.token_refresh_interval:
                     logger.info("Token即将过期，准备刷新...")
                     
+                    # 若处于关键操作（如自动发货）中，等待最多30秒以避免中断
+                    await self._wait_critical_idle(30)
+
                     # 将token刷新移到后台任务，避免阻塞
                     logger.info(f"【{self.cookie_id}】启动后台token刷新任务...")
                     asyncio.create_task(self._background_token_refresh_with_restart())
@@ -6959,7 +6982,8 @@ class XianyuLive:
                         logger.info(f"【{self.cookie_id}】检测到连接重启标志，清理旧连接并准备重连...")
                         self.connection_restart_flag = False
                         
-                        # 清理所有任务
+                        # 清理所有任务（若处于关键发货等操作中，等待最多30秒再清理）
+                        await self._wait_critical_idle(30)
                         if self.heartbeat_task:
                             self.heartbeat_task.cancel()
                             self.heartbeat_task = None
@@ -7037,6 +7061,8 @@ class XianyuLive:
                             self.token_refresh_task = None
                             logger.info(f"【{self.cookie_id}】取消旧的token刷新任务")
                         
+                        # 重连后启动token刷新任务；若处于关键操作中，等最多30秒
+                        await self._wait_critical_idle(30)
                         logger.info(f"【{self.cookie_id}】启动token刷新任务...")
                         self.token_refresh_task = asyncio.create_task(self.token_refresh_loop())
 
@@ -7401,6 +7427,8 @@ class XianyuLive:
     async def send_image_msg(self, ws, cid, toid, image_url, width=800, height=600, card_id=None):
         """发送图片消息"""
         try:
+            # 进入关键操作（图片上传与发送过程中避免被重连/刷新中断）
+            self.critical_idle_event.clear()
             # 检查图片URL是否需要上传到CDN
             original_url = image_url
 
@@ -7519,6 +7547,9 @@ class XianyuLive:
         except Exception as e:
             logger.error(f"【{self.cookie_id}】发送图片消息失败: {self._safe_str(e)}")
             raise
+        finally:
+            # 关键操作结束
+            self.critical_idle_event.set()
 
     async def send_image_from_file(self, ws, cid, toid, image_path):
         """从本地文件发送图片"""
