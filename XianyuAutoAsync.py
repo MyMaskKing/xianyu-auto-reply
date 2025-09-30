@@ -848,12 +848,17 @@ class XianyuLive:
                     from db_manager import db_manager
                     item_info = db_manager.get_item_info(self.cookie_id, item_id)
                     if not item_info:
-                        logger.warning(f'[{msg_time}] 【{self.cookie_id}】❌ 商品 {item_id} 不属于当前账号，跳过自动发货')
-                        return
-                    logger.debug(f'[{msg_time}] 【{self.cookie_id}】✅ 商品 {item_id} 归属验证通过')
+                        # 数据库未命中：可能尚未同步该账号的商品列表。尝试插入最小记录并继续，不阻断发货。
+                        try:
+                            db_manager.save_item_basic_info(self.cookie_id, item_id)
+                            logger.info(f'[{msg_time}] 【{self.cookie_id}】未在DB找到商品 {item_id}，已补登记最小记录并继续发货')
+                        except Exception as insert_e:
+                            logger.warning(f'[{msg_time}] 【{self.cookie_id}】商品 {item_id} 归属未确认，最小记录登记失败: {self._safe_str(insert_e)}，仍继续发货以避免误杀')
+                    else:
+                        logger.debug(f'[{msg_time}] 【{self.cookie_id}】✅ 商品 {item_id} 归属验证通过')
                 except Exception as e:
-                    logger.error(f'[{msg_time}] 【{self.cookie_id}】检查商品归属失败: {self._safe_str(e)}，跳过自动发货')
-                    return
+                    # 归属校验异常时，不阻断发货，避免误杀
+                    logger.error(f'[{msg_time}] 【{self.cookie_id}】检查商品归属失败: {self._safe_str(e)}，将继续发货')
 
             # 提取订单ID
             order_id = self._extract_order_id(message)
@@ -6839,18 +6844,21 @@ class XianyuLive:
                     if card_title == "我已小刀，待刀成":
                         logger.info(f'[{msg_time}] 【{self.cookie_id}】【系统】检测到"我已小刀，待刀成"，即使在暂停期间也继续处理')
 
-                        # 检查商品是否属于当前cookies
+                        # 检查商品是否属于当前cookies（宽松：未命中则尝试登记并继续）
                         if item_id and item_id != "未知商品":
                             try:
                                 from db_manager import db_manager
                                 item_info = db_manager.get_item_info(self.cookie_id, item_id)
                                 if not item_info:
-                                    logger.warning(f'[{msg_time}] 【{self.cookie_id}】❌ 商品 {item_id} 不属于当前账号，跳过免拼发货')
-                                    return
-                                logger.debug(f'[{msg_time}] 【{self.cookie_id}】✅ 商品 {item_id} 归属验证通过')
+                                    try:
+                                        db_manager.save_item_basic_info(self.cookie_id, item_id)
+                                        logger.info(f'[{msg_time}] 【{self.cookie_id}】未在DB找到商品 {item_id}，已补登记最小记录并继续免拼发货')
+                                    except Exception as insert_e:
+                                        logger.warning(f'[{msg_time}] 【{self.cookie_id}】商品 {item_id} 归属未确认，最小记录登记失败: {self._safe_str(insert_e)}，仍继续免拼发货')
+                                else:
+                                    logger.debug(f'[{msg_time}] 【{self.cookie_id}】✅ 商品 {item_id} 归属验证通过')
                             except Exception as e:
-                                logger.error(f'[{msg_time}] 【{self.cookie_id}】检查商品归属失败: {self._safe_str(e)}，跳过免拼发货')
-                                return
+                                logger.error(f'[{msg_time}] 【{self.cookie_id}】检查商品归属失败: {self._safe_str(e)}，将继续免拼发货')
 
                         # 提取订单ID
                         order_id = self._extract_order_id(message)
