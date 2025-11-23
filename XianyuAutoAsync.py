@@ -2571,7 +2571,40 @@ class XianyuLive:
         box_track = await track.bounding_box()
         if not box_handle or not box_track:
             return True
-        distance = max(10, box_track['width'] - box_handle['width'] - 5)
+        
+        # 🔑 关键优化1：使用JavaScript获取更精确的尺寸（避免DPI缩放影响）
+        try:
+            precise_distance = await target_context.evaluate("""
+                () => {
+                    const button = document.querySelector('#nc_1_n1z') || document.querySelector('.nc_iconfont');
+                    const track = document.querySelector('#nc_1_n1t') || document.querySelector('.nc_scale');
+                    if (button && track) {
+                        const buttonRect = button.getBoundingClientRect();
+                        const trackRect = track.getBoundingClientRect();
+                        // 计算实际可滑动距离（考虑padding和边距）
+                        return trackRect.width - buttonRect.width;
+                    }
+                    return null;
+                }
+            """)
+            
+            if precise_distance and precise_distance > 0:
+                logger.info(f"【{self.cookie_id}】使用JavaScript精确计算滑动距离: {precise_distance:.2f}px")
+                # 🔑 关键优化2：添加微小随机偏移（防止每次都完全相同）
+                random_offset = random.uniform(-0.5, 0.5)
+                distance = max(10, precise_distance + random_offset)
+            else:
+                # 后备方案：使用bounding_box计算
+                distance = max(10, box_track['width'] - box_handle['width'] - 5)
+                random_offset = random.uniform(-0.5, 0.5)
+                distance += random_offset
+        except Exception as e:
+            logger.debug(f"【{self.cookie_id}】JavaScript精确计算失败，使用后备方案: {self._safe_str(e)}")
+            distance = max(10, box_track['width'] - box_handle['width'] - 5)
+            random_offset = random.uniform(-0.5, 0.5)
+            distance += random_offset
+        
+        logger.info(f"【{self.cookie_id}】计算滑动距离: {distance:.2f}px")
         success = False
         max_retries = 5
         retry_count = 0
@@ -2644,152 +2677,201 @@ class XianyuLive:
                         logger.debug(f"【{self.cookie_id}】刷新后元素无有效位置信息，继续重试")
                         continue
                     distance = max(10, box_track['width'] - box_handle['width'] - 5)
-                await target_context.wait_for_timeout(400)
+                await target_context.wait_for_timeout(random.randint(100, 200))  # 随机等待，模拟人类反应
                 start_x = box_handle['x'] + box_handle['width'] / 2
                 start_y = box_handle['y'] + box_handle['height'] / 2
-                # 预热：随机移动与轻点容器，模拟人类探索
-                try:
-                    # 若有容器可点，先激活组件
-                    container_click = await (target_context.query_selector('#nc_1_wrapper') or target_context.query_selector('.nc_wrapper'))
-                    if container_click:
-                        box_c = await container_click.bounding_box()
-                        if box_c:
-                            await page.mouse.move(box_c['x'] + box_c['width']/2, box_c['y'] + box_c['height']/2, steps=3)
-                            await page.mouse.click(box_c['x'] + box_c['width']/2, box_c['y'] + box_c['height']/2)
-                    await page.mouse.move(start_x - 20, start_y + 8, steps=4)
-                    await page.mouse.move(start_x + 12, start_y - 6, steps=3)
-                    await page.mouse.move(start_x, start_y, steps=2)
-                except Exception:
-                    pass
-                await target_context.wait_for_timeout(120)
+                
+                # 🔑 优化：模拟人类：先移动到附近，再精确移动到滑块
+                # 添加微小的随机偏移，模拟人类不精确的定位
+                offset_x = random.uniform(-2, 2)
+                offset_y = random.uniform(-2, 2)
+                await page.mouse.move(start_x + offset_x, start_y + offset_y, steps=random.randint(2, 4))
+                await target_context.wait_for_timeout(random.randint(20, 50))  # 短暂停顿
+                
+                # 精确移动到滑块中心
+                await page.mouse.move(start_x, start_y, steps=random.randint(1, 2))
+                await target_context.wait_for_timeout(random.randint(30, 80))  # 准备时间
+                
+                # 按下鼠标，准备拖动
                 await page.mouse.down()
-                await target_context.wait_for_timeout(120)
+                await target_context.wait_for_timeout(random.randint(20, 40))  # 按下后的短暂停顿
 
-                # 生成符合阿里云滑块验证的人类轨迹（基于实际测试优化）
+                # 🔑 优化：模拟人类滑动的轨迹生成（参考优化版本，但调整为更像人类）
+                # 平衡策略：
+                # 1. 适中的步数（15-25步）：既快速又自然
+                # 2. 先加速后减速：模拟真实人类滑动
+                # 3. 确保超调50-80%：保证滑动到位但不过度
+                # 4. 添加自然抖动和随机性
                 def _generate_human_tracks(total_distance):
                     tracks = []  # (dx, dy, delay_ms)
+                    
+                    # 确保适度超调（50-80%），既保证到位又不过度
+                    target_distance = total_distance * random.uniform(1.5, 1.8)  # 超调50-80%
+                    
+                    # 适中的步数（15-25步），既快速又自然
+                    steps = random.randint(15, 25)
+                    
+                    # 合理的延迟（10-30毫秒），模拟人类反应时间
+                    base_delay_min = 10
+                    base_delay_max = 30
+                    
+                    # 生成轨迹点 - 先加速后减速（更自然）
                     current = 0.0
-                    
-                    # 阿里云滑块验证对轨迹要求较高，需要更真实的模拟
-                    # 使用更复杂的轨迹生成算法
-                    steps = random.randint(35, 55)  # 增加步数，使轨迹更平滑
-                    
                     for i in range(steps):
-                        t = i / steps
+                        progress = (i + 1) / steps
                         
-                        # 使用更复杂的缓动函数（贝塞尔曲线）
-                        if t < 0.5:
-                            ease = 2 * t * t
+                        # 使用缓动函数：先加速后减速（easeInOut）
+                        if progress < 0.5:
+                            # 前半段加速
+                            ease = 2 * progress * progress
                         else:
-                            ease = 1 - 2 * (1 - t) * (1 - t)
+                            # 后半段减速
+                            ease = 1 - 2 * (1 - progress) * (1 - progress)
                         
-                        target = total_distance * ease
+                        target = target_distance * ease
                         move = max(0.0, target - current)
-                        
-                        # 添加更真实的随机性
-                        move += random.uniform(-0.5, 0.8)
-                        if current + move > total_distance:
-                            move = total_distance - current
-                        
                         current += move
                         
-                        # 根据移动阶段调整抖动幅度
-                        if t < 0.2:  # 初始阶段
-                            jitter_y = random.uniform(-2.0, 2.0)
-                            delay_ms = random.uniform(6, 15)
-                        elif t < 0.6:  # 中间阶段
-                            jitter_y = random.uniform(-1.2, 1.2)
-                            delay_ms = random.uniform(10, 20)
-                        else:  # 结束阶段
-                            jitter_y = random.uniform(-0.8, 0.8)
-                            delay_ms = random.uniform(15, 30)
+                        # 添加自然抖动（Y轴随机偏移）
+                        if progress < 0.3:  # 初始阶段抖动较大
+                            y = random.uniform(-2.0, 2.0)
+                        elif progress < 0.7:  # 中间阶段抖动中等
+                            y = random.uniform(-1.5, 1.5)
+                        else:  # 结束阶段抖动较小
+                            y = random.uniform(-1.0, 1.0)
                         
-                        tracks.append((move, jitter_y, delay_ms))
+                        # 根据阶段调整延迟（开始慢，中间快，结束稍慢）
+                        if progress < 0.2:
+                            delay_ms = random.uniform(base_delay_min, base_delay_max * 1.2)
+                        elif progress < 0.8:
+                            delay_ms = random.uniform(base_delay_min * 0.7, base_delay_max * 0.8)
+                        else:
+                            delay_ms = random.uniform(base_delay_min, base_delay_max)
+                        
+                        tracks.append((move, y, delay_ms))
                     
-                    # 添加人类特有的微调行为
-                    # 1. 轻微超调再回拉（模拟人类不精确的定位）
-                    overshoot = random.uniform(1, 4)
-                    tracks.append((overshoot, random.uniform(-0.5, 0.5), random.uniform(20, 35)))
-                    tracks.append((-overshoot + random.uniform(-0.5, 0.5), random.uniform(-0.5, 0.5), random.uniform(25, 40)))
+                    # 添加轻微的最终微调（模拟人类不精确的定位）
+                    if random.random() < 0.5:  # 50%概率添加微调
+                        overshoot = random.uniform(1, 3)
+                        tracks.append((overshoot, random.uniform(-0.5, 0.5), random.uniform(15, 25)))
+                        tracks.append((-overshoot * 0.5, random.uniform(-0.5, 0.5), random.uniform(20, 30)))
                     
-                    # 2. 添加随机停顿（模拟人类犹豫）
-                    if random.random() < 0.3:  # 30%概率添加停顿
-                        pause_delay = random.uniform(50, 120)
-                        tracks.append((0, 0, pause_delay))
-                    
+                    logger.info(f"【{self.cookie_id}】人类化轨迹：{len(tracks)}步，超调50-80%，目标距离: {target_distance:.2f}px")
                     return tracks
 
                 _tracks = _generate_human_tracks(distance)
                 cur_x = start_x
-                for dx, dy, delay_ms in _tracks:
+                
+                # 🔑 优化：模拟人类滑动：平滑移动，自然延迟
+                for i, (dx, dy, delay_ms) in enumerate(_tracks):
                     cur_x += dx
-                    await page.mouse.move(cur_x, start_y + dy, steps=2)
-                    await target_context.wait_for_timeout(int(delay_ms))
-
-                # 末尾停顿再松开（阿里云滑块验证需要更长的停顿）
-                await target_context.wait_for_timeout(200)
-                await page.mouse.up()
-                await target_context.wait_for_timeout(800)  # 增加等待时间，让验证完成
-                success = False
-                # 打印一次关键节点信息，辅助诊断
-                try:
-                    pos_info = await target_context.evaluate('''() => {
-                        const slider = document.getElementById('nc_1_n1z') || document.querySelector('.nc_iconfont.btn_slide') || document.querySelector('.slider');
-                        return slider ? (slider.style.left || (slider.getAttribute('style')||'')) : ''
-                    }''')
-                    logger.debug(f"【{self.cookie_id}】滑块left样式: {pos_info}")
+                    # 使用steps参数使移动更平滑
+                    await page.mouse.move(cur_x, start_y + dy, steps=random.randint(1, 3))
                     
-                    # 检查阿里云滑块验证状态
-                    nc_status = await target_context.evaluate('''() => {
-                        // 检查阿里云滑块验证的状态
-                        const ncWrapper = document.getElementById('nc_1_wrapper');
-                        const ncContainer = document.querySelector('.nc-container');
-                        if (ncWrapper) {
-                            return {
-                                wrapperVisible: ncWrapper.style.display !== 'none',
-                                wrapperClass: ncWrapper.className,
-                                hasSuccessClass: ncWrapper.className.includes('success') || ncWrapper.className.includes('ok'),
-                                hasErrorClass: ncWrapper.className.includes('error') || ncWrapper.className.includes('fail')
-                            };
-                        }
-                        return null;
-                    }''')
-                    if nc_status:
-                        logger.info(f"【{self.cookie_id}】阿里云滑块状态: {nc_status}")
-                        
-                except Exception as e:
-                    logger.debug(f"【{self.cookie_id}】检查滑块状态时出错: {self._safe_str(e)}")
-                success_selectors = [
-                    '.nc-lang-cnt[data-nc-lang="SUCCESS"]', '.success', '.nc_iconfont.btn_ok', '#nc_1__scale_text > span.success', '.tips_success'
-                ]
-                for s in success_selectors:
-                    try:
-                        await target_context.wait_for_selector(s, timeout=1000)
+                    # 应用延迟（确保至少1毫秒，避免int(0.2)=0的问题）
+                    actual_delay = max(1, int(delay_ms * random.uniform(0.9, 1.1)))
+                    await target_context.wait_for_timeout(actual_delay)
+                
+                # 🔑 优化：模拟人类：末尾稍作停顿再松开
+                await target_context.wait_for_timeout(random.randint(50, 150))  # 50-150ms停顿
+                await page.mouse.up()
+                logger.info(f"【{self.cookie_id}】滑动完成（人类化轨迹，{len(_tracks)}步）")
+                
+                # 🔑 优化：人类化验证检查（分阶段检查，确保准确性）
+                await target_context.wait_for_timeout(500)  # 等待验证处理
+                success = False
+                
+                # 1. 快速检查：滑块容器是否消失
+                try:
+                    container = await target_context.query_selector(".nc-container")
+                    if not container or not await container.is_visible():
+                        logger.info(f"【{self.cookie_id}】✓ 滑块容器已消失，验证成功")
                         success = True
-                        break
-                    except Exception:
-                        pass
+                except:
+                    pass
+                
+                # 2. 检查：页面URL是否改变
                 if not success:
                     try:
+                        current_url = page.url
+                        if "captcha" not in current_url.lower() and "action=captcha" not in current_url and "verify" not in current_url.lower():
+                            logger.info(f"【{self.cookie_id}】✓ 页面URL已改变，验证成功")
+                            success = True
+                    except:
+                        pass
+                
+                # 3. 等待验证完成，进行详细检查
+                if not success:
+                    await target_context.wait_for_timeout(1000)  # 等待1秒让验证完成
+                    
+                    # 检查滑块按钮的left属性是否改变，以及验证状态
+                    try:
                         verification_result = await target_context.evaluate('''() => {
-                            const slider = document.getElementById('nc_1_n1z');
-                            const sliderPosition = slider ? parseFloat(slider.style.left)||0 : 0;
-                            const container = document.getElementById('nocaptcha') || document.querySelector('.nc-container');
-                            const containerClass = container ? container.className : '';
+                            const slider = document.getElementById('nc_1_n1z') || document.querySelector('.nc_iconfont.btn_slide');
+                            const sliderPosition = slider ? (parseFloat(slider.style.left) || 0) : 0;
+                            
+                            const container = document.getElementById('nocaptcha') || document.querySelector('.nc-container') || document.getElementById('nc_1_wrapper');
+                            const containerVisible = container ? (window.getComputedStyle(container).display !== 'none') : false;
+                            
                             const tips = document.querySelector('.nc-lang-cnt') || document.querySelector('.slide-tips');
-                            const tipText = tips ? (tips.innerText||'') : '';
-                            const overlay = document.querySelector('.nc_mask');
-                            const overlayDisappeared = !overlay || window.getComputedStyle(overlay).display === 'none';
-                            const hasSuccessClass = containerClass.includes('success') || containerClass.includes('ok');
-                            const hasSuccessText = tipText.includes('成功') || tipText.includes('验证通过');
-                            return { sliderPosition, hasSuccessClass, hasSuccessText, overlayDisappeared,
-                                isSuccess: hasSuccessClass || hasSuccessText || (sliderPosition>0 && overlayDisappeared) };
+                            const tipText = tips ? (tips.innerText || tips.textContent || '') : '';
+                            
+                            const hasSuccessText = tipText.includes('成功') || tipText.includes('验证通过') || tipText.includes('SUCCESS');
+                            const hasErrorText = tipText.includes('失败') || tipText.includes('重试') || tipText.includes('FAIL');
+                            
+                            return {
+                                sliderPosition: sliderPosition,
+                                containerVisible: containerVisible,
+                                tipText: tipText,
+                                hasSuccessText: hasSuccessText,
+                                hasErrorText: hasErrorText,
+                                isSuccess: !containerVisible || hasSuccessText || (sliderPosition > 0 && !hasErrorText)
+                            };
                         }''')
-                        if verification_result.get('isSuccess', False):
+                        
+                        if verification_result:
+                            logger.info(f"【{self.cookie_id}】验证状态检查: 滑块位置={verification_result.get('sliderPosition', 0):.2f}px, "
+                                      f"容器可见={verification_result.get('containerVisible', False)}, "
+                                      f"提示文本='{verification_result.get('tipText', '')[:50]}'")
+                            
+                            if verification_result.get('isSuccess', False):
+                                logger.info(f"【{self.cookie_id}】✓ 验证成功（通过状态检查）")
+                                success = True
+                            elif verification_result.get('sliderPosition', 0) > distance * 0.85:  # 滑动超过85%认为成功
+                                logger.info(f"【{self.cookie_id}】✓ 滑块已移动到位（位置: {verification_result.get('sliderPosition', 0):.2f}px），验证成功")
+                                success = True
+                    except Exception as e:
+                        logger.debug(f"【{self.cookie_id}】检查滑块状态时出错: {self._safe_str(e)}")
+                    
+                    # 检查成功消息选择器
+                    if not success:
+                        success_selectors = [
+                            '.nc-lang-cnt[data-nc-lang="SUCCESS"]', 
+                            '.success', 
+                            '.nc_iconfont.btn_ok', 
+                            '#nc_1__scale_text > span.success', 
+                            '.tips_success',
+                            'text=验证成功',
+                            'text=验证通过'
+                        ]
+                        for s in success_selectors:
+                            try:
+                                elem = await target_context.query_selector(s)
+                                if elem and await elem.is_visible():
+                                    logger.info(f"【{self.cookie_id}】✓ 找到成功提示: {s}")
+                                    success = True
+                                    break
+                            except:
+                                continue
+                
+                # 4. 最终检查：滑块轨道是否消失
+                if not success:
+                    try:
+                        track_elem = await target_context.query_selector("#nc_1_n1t")
+                        if not track_elem or not await track_elem.is_visible():
+                            logger.info(f"【{self.cookie_id}】✓ 滑块轨道已消失，验证成功")
                             success = True
-                        elif verification_result.get('sliderPosition', 0) > distance * 0.9:
-                            success = True
-                    except Exception:
+                    except:
                         pass
             except Exception:
                 pass
