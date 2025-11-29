@@ -726,6 +726,7 @@ class XianyuLive:
         self.heartbeat_missing_threshold = 10800  # 3小时未运行心跳任务需要通知
         self.last_heartbeat_missing_notification_time = 0  # 上次发送心跳缺失通知时间
         self.heartbeat_missing_notification_cooldown = 10800  # 心跳缺失通知冷却时间：3小时
+        self.heartbeat_long_missing = False  # 标记心跳是否已经长时间缺失（超过阈值），如果为True，则不再自动恢复心跳，等待手动登录
 
         # 浏览器Cookie刷新成功标志
         self.browser_cookie_refreshed = False  # 标记_refresh_cookies_via_browser是否成功更新过数据库
@@ -2243,6 +2244,12 @@ class XianyuLive:
                 
                 if update_success:
                     logger.info(f"【{self.cookie_id}】Cookie更新并重启任务成功")
+                    
+                    # 重置心跳长时间缺失标志（密码登录成功后允许自动恢复心跳）
+                    if self.heartbeat_long_missing:
+                        self.heartbeat_long_missing = False
+                        logger.info(f"【{self.cookie_id}】✅ 密码登录成功，已重置心跳长时间缺失标志，允许自动恢复心跳")
+                    
                     # 发送账号密码登录成功通知
                     await self.send_token_refresh_notification(
                         f"账号密码登录成功，Cookie已更新，任务已重启",
@@ -5544,6 +5551,7 @@ class XianyuLive:
                         if self.heartbeat_missing_since != 0:
                             logger.info(f"【{self.cookie_id}】心跳任务已恢复运行，重置缺失计时")
                             self.heartbeat_missing_since = 0
+                        # 注意：heartbeat_long_missing 标志不会在这里重置，只有在密码登录成功后才会重置
                     
                     # 检查是否收到过消息
                     if self.last_message_received_time == 0:
@@ -5627,8 +5635,14 @@ class XianyuLive:
         minutes = int((missing_duration % 3600) // 60)
         message = f"心跳任务已缺失 {hours} 小时 {minutes} 分钟，请手动使用密码登录以恢复心跳"
         logger.warning(f"【{self.cookie_id}】⚠️ {message}")
+        
+        # 标记心跳长时间缺失，停止自动恢复
+        if not self.heartbeat_long_missing:
+            self.heartbeat_long_missing = True
+            logger.warning(f"【{self.cookie_id}】⚠️ 心跳已长时间缺失，已设置标志：停止自动恢复心跳，等待手动登录")
+        
         await self.send_token_refresh_notification(
-            f"【心跳监控】{message}",
+            f"【心跳监控】{message}（系统已停止自动恢复，请手动使用密码登录）",
             "heartbeat_missing"
         )
         self.last_heartbeat_missing_notification_time = current_time
@@ -5661,10 +5675,13 @@ class XianyuLive:
                     timeout=180.0  # 3分钟超时，减少对WebSocket的影响
                 )
 
-                # 重新启动心跳任务
+                # 重新启动心跳任务（检查是否已长时间缺失，如果是则不自动恢复）
                 if heartbeat_was_running and self.ws and not self.ws.closed:
-                    logger.warning(f"【{self.cookie_id}】重新启动心跳任务")
-                    self.heartbeat_task = asyncio.create_task(self.heartbeat_loop(self.ws))
+                    if self.heartbeat_long_missing:
+                        logger.warning(f"【{self.cookie_id}】⚠️ 心跳已长时间缺失，跳过自动恢复，等待手动登录")
+                    else:
+                        logger.warning(f"【{self.cookie_id}】重新启动心跳任务")
+                        self.heartbeat_task = asyncio.create_task(self.heartbeat_loop(self.ws))
 
                 if success:
                     self.last_cookie_refresh_time = current_time
@@ -5711,11 +5728,14 @@ class XianyuLive:
                 # 异常也要更新时间，避免频繁重试
                 self.last_cookie_refresh_time = current_time
             finally:
-                # 确保心跳任务恢复（如果WebSocket仍然连接）
+                # 确保心跳任务恢复（如果WebSocket仍然连接，且心跳未长时间缺失）
                 if (self.ws and not self.ws.closed and
                     (not self.heartbeat_task or self.heartbeat_task.done())):
-                    logger.info(f"【{self.cookie_id}】Cookie刷新完成，心跳任务正常运行")
-                    self.heartbeat_task = asyncio.create_task(self.heartbeat_loop(self.ws))
+                    if self.heartbeat_long_missing:
+                        logger.warning(f"【{self.cookie_id}】⚠️ 心跳已长时间缺失，跳过自动恢复，等待手动登录")
+                    else:
+                        logger.info(f"【{self.cookie_id}】Cookie刷新完成，心跳任务正常运行")
+                        self.heartbeat_task = asyncio.create_task(self.heartbeat_loop(self.ws))
 
                 # 清空消息接收标志，允许下次正常执行Cookie刷新
                 self.last_message_received_time = 0
@@ -7856,9 +7876,12 @@ class XianyuLive:
                                 logger.warning(f"【{self.cookie_id}】检测到旧心跳任务引用，先清理...")
                                 self._reset_background_tasks()
 
-                            # 启动心跳任务（依赖WebSocket，每次重连都需要重启）
-                            logger.info(f"【{self.cookie_id}】启动心跳任务...")
-                            self.heartbeat_task = asyncio.create_task(self.heartbeat_loop(websocket))
+                            # 启动心跳任务（依赖WebSocket，每次重连都需要重启，但检查是否已长时间缺失）
+                            if self.heartbeat_long_missing:
+                                logger.warning(f"【{self.cookie_id}】⚠️ 心跳已长时间缺失，跳过自动启动心跳任务，等待手动登录")
+                            else:
+                                logger.info(f"【{self.cookie_id}】启动心跳任务...")
+                                self.heartbeat_task = asyncio.create_task(self.heartbeat_loop(websocket))
 
                             # 启动其他后台任务（不依赖WebSocket，只在首次连接时启动）
                             tasks_started = []
