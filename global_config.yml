@@ -52,7 +52,7 @@ LOG_CONFIG:
     | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>'
   level: INFO
   retention: 7 days
-  rotation: 1 day
+  rotation: "00:00"  # 每天0点轮转（而不是从程序启动时间开始计算24小时）
 MANUAL_MODE:
   enabled: false
   timeout: 3600
