@@ -5349,10 +5349,14 @@ class XianyuLive:
         try:
             if message_data.get("code") == 200:
                 self.last_heartbeat_response = time.time()
-                logger.warning("心跳响应正常")
+                # 【重要】心跳响应也是消息，需要更新消息接收时间，避免监控任务误判为"从未收到消息"
+                self.last_message_received_time = time.time()
+                logger.warning(f"【{self.cookie_id}】心跳响应正常，已更新消息接收时间: {self.last_message_received_time}")
                 return True
+            else:
+                logger.debug(f"【{self.cookie_id}】心跳响应code不是200: {message_data.get('code')}, 消息内容: {message_data}")
         except Exception as e:
-            logger.error(f"处理心跳响应出错: {self._safe_str(e)}")
+            logger.error(f"【{self.cookie_id}】处理心跳响应出错: {self._safe_str(e)}")
         return False
 
     async def pause_cleanup_loop(self):
@@ -5563,6 +5567,7 @@ class XianyuLive:
                         # 如果从未收到过消息，检查连接时间
                         if self.last_successful_connection > 0:
                             time_since_connection = current_time - self.last_successful_connection
+                            logger.debug(f"【{self.cookie_id}】消息监控检查: last_message_received_time=0, 连接时间={int(time_since_connection/60)}分钟, 阈值={int(self.message_no_receive_threshold/60)}分钟")
                             if time_since_connection > self.message_no_receive_threshold:
                                 # 连接后30分钟还没收到消息，发送通知
                                 await self._send_message_monitor_notification(
@@ -5570,6 +5575,9 @@ class XianyuLive:
                                 )
                         await self._interruptible_sleep(self.message_monitor_interval)
                         continue
+                    else:
+                        # 已收到过消息，记录调试信息
+                        logger.debug(f"【{self.cookie_id}】消息监控检查: 已收到消息，last_message_received_time={self.last_message_received_time}")
 
                     # 检查距离上次收到消息的时间
                     time_since_last_message = current_time - self.last_message_received_time
