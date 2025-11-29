@@ -31,6 +31,11 @@ except ImportError:
 
 # 使用loguru日志库，与主程序保持一致
 
+# 自定义异常类
+class NetworkErrorException(Exception):
+    """网络错误异常，用于标识需要等待一段时间后再重试的网络错误"""
+    pass
+
 # 全局并发控制
 class SliderConcurrencyManager:
     """滑块验证并发管理器"""
@@ -3030,10 +3035,45 @@ class XianyuSliderStealth:
             logger.info(f"【{self.pure_user_id}】浏览器已成功启动（{browser_mode}模式）")
             
             try:
-                # 访问登录页面
+                # 访问登录页面（带重试机制，处理网络错误）
                 login_url = "https://www.goofish.com/im"
                 logger.info(f"【{self.pure_user_id}】访问登录页面: {login_url}")
-                page.goto(login_url, wait_until='networkidle', timeout=60000)
+                
+                # 网络访问配置（网络错误时等待3小时后再重试）
+                goto_timeout = 60000  # 超时时间（毫秒）
+                network_error_wait_hours = 3  # 网络错误时等待3小时
+                network_error_wait_seconds = network_error_wait_hours * 3600  # 转换为秒
+                
+                try:
+                    # 尝试访问页面
+                    page.goto(login_url, wait_until='networkidle', timeout=goto_timeout)
+                    logger.info(f"【{self.pure_user_id}】✅ 成功访问登录页面")
+                    
+                except Exception as goto_error:
+                    error_msg = str(goto_error)
+                    
+                    # 检查是否是网络连接错误
+                    is_network_error = (
+                        'ERR_CONNECTION_CLOSED' in error_msg or
+                        'net::ERR_CONNECTION_CLOSED' in error_msg or
+                        'ConnectionClosed' in error_msg or
+                        'Connection reset' in error_msg or
+                        'Connection refused' in error_msg or
+                        'timeout' in error_msg.lower() or
+                        'Timed out' in error_msg
+                    )
+                    
+                    if is_network_error:
+                        logger.error(f"【{self.pure_user_id}】❌ 网络连接错误: {error_msg}")
+                        logger.warning(f"【{self.pure_user_id}】⚠️ 检测到网络问题，将在 {network_error_wait_hours} 小时后再尝试密码登录")
+                        logger.warning(f"【{self.pure_user_id}】等待时间: {network_error_wait_seconds} 秒 ({network_error_wait_hours} 小时)")
+                        
+                        # 抛出特殊异常，让调用方知道这是网络错误，需要等待3小时
+                        raise NetworkErrorException(f"网络连接错误，需要等待{network_error_wait_hours}小时后再重试: {error_msg}") from goto_error
+                    else:
+                        # 非网络错误，直接抛出
+                        logger.error(f"【{self.pure_user_id}】❌ 访问页面时发生非网络错误: {error_msg}")
+                        raise
                 
                 # 等待页面加载
                 wait_time = 2 if not show_browser else 2

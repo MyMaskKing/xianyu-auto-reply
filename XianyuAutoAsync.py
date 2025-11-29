@@ -181,6 +181,7 @@ class XianyuLive:
     # 类级别的密码登录时间记录，用于防止重复登录
     _last_password_login_time = {}  # {cookie_id: timestamp}
     _password_login_cooldown = 60  # 密码登录冷却时间：60秒
+    _password_login_in_progress = {}  # {cookie_id: bool} 标记是否正在执行密码登录，防止并发执行
     
     def _safe_str(self, e):
         """安全地将异常转换为字符串"""
@@ -269,6 +270,9 @@ class XianyuLive:
         if self.cookie_refresh_task:
             status = "已完成" if self.cookie_refresh_task.done() else "运行中"
             other_tasks_status.append(f"Cookie刷新任务({status})")
+        if self.message_monitor_task:
+            status = "已完成" if self.message_monitor_task.done() else "运行中"
+            other_tasks_status.append(f"消息监控任务({status})")
         
         if other_tasks_status:
             logger.info(f"【{self.cookie_id}】其他任务继续运行（不依赖WebSocket）: {', '.join(other_tasks_status)}")
@@ -306,6 +310,12 @@ class XianyuLive:
                     tasks_to_cancel.append(("Cookie刷新任务", self.cookie_refresh_task))
                 else:
                     logger.debug(f"【{self.cookie_id}】Cookie刷新任务已完成，跳过")
+                    
+            if self.message_monitor_task:
+                if not self.message_monitor_task.done():
+                    tasks_to_cancel.append(("消息监控任务", self.message_monitor_task))
+                else:
+                    logger.debug(f"【{self.cookie_id}】消息监控任务已完成，跳过")
             
             if not tasks_to_cancel:
                 logger.info(f"【{self.cookie_id}】没有后台任务需要取消（所有任务已完成或不存在）")
@@ -314,6 +324,7 @@ class XianyuLive:
                 self.token_refresh_task = None
                 self.cleanup_task = None
                 self.cookie_refresh_task = None
+                self.message_monitor_task = None
                 return
             
             logger.info(f"【{self.cookie_id}】开始取消 {len(tasks_to_cancel)} 个未完成的后台任务...")
@@ -702,6 +713,19 @@ class XianyuLive:
         # 消息接收标识 - 用于控制Cookie刷新
         self.last_message_received_time = 0  # 记录上次收到消息的时间
         self.message_cookie_refresh_cooldown = 300  # 收到消息后5分钟内不执行Cookie刷新
+        
+        # 消息接收监控任务
+        self.message_monitor_task = None
+        self.message_monitor_interval = 300  # 每5分钟检查一次
+        self.message_no_receive_threshold = 1800  # 30分钟没收到消息算异常（需要通知）
+        self.last_message_monitor_notification_time = 0  # 上次发送消息监控通知的时间
+        self.message_monitor_notification_cooldown = 3600  # 消息监控通知冷却时间：1小时
+        
+        # 心跳任务缺失监控
+        self.heartbeat_missing_since = 0  # 记录心跳任务缺失开始时间
+        self.heartbeat_missing_threshold = 10800  # 3小时未运行心跳任务需要通知
+        self.last_heartbeat_missing_notification_time = 0  # 上次发送心跳缺失通知时间
+        self.heartbeat_missing_notification_cooldown = 10800  # 心跳缺失通知冷却时间：3小时
 
         # 浏览器Cookie刷新成功标志
         self.browser_cookie_refreshed = False  # 标记_refresh_cookies_via_browser是否成功更新过数据库
@@ -2071,6 +2095,11 @@ class XianyuLive:
         """
         logger.warning(f"【{self.cookie_id}】检测到{trigger_reason}，准备刷新Cookie并重启实例...")
 
+        # 检查是否正在执行密码登录，防止并发执行
+        if XianyuLive._password_login_in_progress.get(self.cookie_id, False):
+            logger.warning(f"【{self.cookie_id}】密码登录正在进行中，跳过本次触发（防止并发执行）")
+            return False
+
         # 检查是否在密码登录冷却期内，避免重复登录
         current_time = time.time()
         last_password_login = XianyuLive._last_password_login_time.get(self.cookie_id, 0)
@@ -2081,6 +2110,16 @@ class XianyuLive:
             logger.warning(f"【{self.cookie_id}】距离上次密码登录仅 {time_since_last_login:.1f} 秒，仍在冷却期内（还需等待 {remaining_time:.1f} 秒），跳过密码登录")
             logger.warning(f"【{self.cookie_id}】提示：如果新Cookie仍然无效，请检查账号状态或手动更新Cookie")
             return False
+
+        # 立即标记为正在执行，防止并发
+        XianyuLive._password_login_in_progress[self.cookie_id] = True
+        # 立即记录时间戳（即使可能失败），防止重复触发
+        XianyuLive._last_password_login_time[self.cookie_id] = current_time
+        logger.info(f"【{self.cookie_id}】已标记密码登录进行中，并记录时间戳（防止并发执行）")
+        
+        # 重置连接失败计数，避免在密码登录期间重复触发
+        self.connection_failures = 0
+        logger.info(f"【{self.cookie_id}】已重置连接失败计数，避免重复触发密码登录")
 
         # 记录到日志文件
         log_captcha_event(self.cookie_id, f"{trigger_reason}触发Cookie刷新和实例重启", None,
@@ -2137,14 +2176,35 @@ class XianyuLive:
             
             # 在单独的线程中运行同步的登录方法
             import asyncio
+            from utils.xianyu_slider_stealth import NetworkErrorException
+            
             slider = XianyuSliderStealth(user_id=self.cookie_id, enable_learning=False, headless=not show_browser)
-            result = await asyncio.to_thread(
-                slider.login_with_password_playwright,
-                account=username,
-                password=password,
-                show_browser=show_browser,
-                notification_callback=notification_callback_wrapper
-            )
+            try:
+                result = await asyncio.to_thread(
+                    slider.login_with_password_playwright,
+                    account=username,
+                    password=password,
+                    show_browser=show_browser,
+                    notification_callback=notification_callback_wrapper
+                )
+            except NetworkErrorException as network_err:
+                # 网络错误，等待3小时后再重试
+                network_wait_hours = 3
+                network_wait_seconds = network_wait_hours * 3600
+                logger.error(f"【{self.cookie_id}】❌ 密码登录遇到网络错误: {str(network_err)}")
+                logger.warning(f"【{self.cookie_id}】⚠️ 将在 {network_wait_hours} 小时（{network_wait_seconds} 秒）后再尝试密码登录")
+                
+                # 更新密码登录时间戳，设置为3小时后
+                XianyuLive._last_password_login_time[self.cookie_id] = time.time() + network_wait_seconds - XianyuLive._password_login_cooldown
+                logger.info(f"【{self.cookie_id}】已更新密码登录时间戳，将在 {network_wait_hours} 小时后允许重试")
+                
+                # 发送通知
+                await self.send_token_refresh_notification(
+                    f"密码登录遇到网络错误，将在{network_wait_hours}小时后再尝试: {str(network_err)}",
+                    "network_error"
+                )
+                
+                return False
             
             if result:
                 logger.info(f"【{self.cookie_id}】密码登录成功，获取到Cookie")
@@ -2175,9 +2235,8 @@ class XianyuLive:
                 new_cookies_str = '; '.join([f"{k}={v}" for k, v in result.items()])
                 logger.info(f"【{self.cookie_id}】Cookie字符串格式: {new_cookies_str[:200]}..." if len(new_cookies_str) > 200 else f"【{self.cookie_id}】Cookie字符串格式: {new_cookies_str}")
                 
-                # 记录密码登录时间，防止重复登录
-                XianyuLive._last_password_login_time[self.cookie_id] = time.time()
-                logger.warning(f"【{self.cookie_id}】已记录密码登录时间，冷却期 {XianyuLive._password_login_cooldown} 秒")
+                # 密码登录时间已在开始时记录，这里只需要确认
+                logger.warning(f"【{self.cookie_id}】密码登录成功，时间戳已记录，冷却期 {XianyuLive._password_login_cooldown} 秒")
                 
                 # 更新cookies并重启任务
                 update_success = await self._update_cookies_and_restart(new_cookies_str)
@@ -2203,6 +2262,10 @@ class XianyuLive:
             import traceback
             logger.error(f"【{self.cookie_id}】详细堆栈:\n{traceback.format_exc()}")
             return False
+        finally:
+            # 无论成功或失败，都要清除"正在执行"标志
+            XianyuLive._password_login_in_progress[self.cookie_id] = False
+            logger.info(f"【{self.cookie_id}】已清除密码登录进行中标志")
 
     async def _verify_cookie_validity(self) -> dict:
         """验证Cookie的有效性，通过实际调用API测试
@@ -5449,6 +5512,134 @@ class XianyuLive:
             # 确保任务能正常结束
             logger.info(f"【{self.cookie_id}】Cookie刷新循环已退出")
 
+    async def message_monitor_loop(self):
+        """消息接收监控任务 - 监控WebSocket消息接收情况"""
+        try:
+            while True:
+                try:
+                    # 检查账号是否启用
+                    from cookie_manager import manager as cookie_manager
+                    if cookie_manager and not cookie_manager.get_cookie_status(self.cookie_id):
+                        logger.info(f"【{self.cookie_id}】账号已禁用，停止消息监控循环")
+                        break
+
+                    # 检查WebSocket连接状态
+                    if self.connection_state != ConnectionState.CONNECTED:
+                        # 如果未连接，等待一段时间后再检查
+                        await self._interruptible_sleep(self.message_monitor_interval)
+                        continue
+
+                    current_time = time.time()
+                    
+                    # 监控心跳任务状态
+                    if not self.heartbeat_task or self.heartbeat_task.done():
+                        if self.heartbeat_missing_since == 0:
+                            self.heartbeat_missing_since = current_time
+                            logger.warning(f"【{self.cookie_id}】检测到心跳任务缺失，开始计时监控")
+                        else:
+                            missing_duration = current_time - self.heartbeat_missing_since
+                            if missing_duration > self.heartbeat_missing_threshold:
+                                await self._send_heartbeat_missing_notification(missing_duration)
+                    else:
+                        if self.heartbeat_missing_since != 0:
+                            logger.info(f"【{self.cookie_id}】心跳任务已恢复运行，重置缺失计时")
+                            self.heartbeat_missing_since = 0
+                    
+                    # 检查是否收到过消息
+                    if self.last_message_received_time == 0:
+                        # 如果从未收到过消息，检查连接时间
+                        if self.last_successful_connection > 0:
+                            time_since_connection = current_time - self.last_successful_connection
+                            if time_since_connection > self.message_no_receive_threshold:
+                                # 连接后30分钟还没收到消息，发送通知
+                                await self._send_message_monitor_notification(
+                                    f"WebSocket已连接{int(time_since_connection/60)}分钟，但从未收到消息"
+                                )
+                        await self._interruptible_sleep(self.message_monitor_interval)
+                        continue
+
+                    # 检查距离上次收到消息的时间
+                    time_since_last_message = current_time - self.last_message_received_time
+                    
+                    if time_since_last_message > self.message_no_receive_threshold:
+                        # 超过30分钟没收到消息，发送通知
+                        hours = int(time_since_last_message // 3600)
+                        minutes = int((time_since_last_message % 3600) // 60)
+                        await self._send_message_monitor_notification(
+                            f"已{hours}小时{minutes}分钟未收到WebSocket消息（上次收到: {self._format_time(self.last_message_received_time)}）"
+                        )
+
+                    # 每5分钟检查一次
+                    await self._interruptible_sleep(self.message_monitor_interval)
+
+                except asyncio.CancelledError:
+                    # 收到取消信号，立即退出循环
+                    logger.info(f"【{self.cookie_id}】消息监控循环收到取消信号，准备退出")
+                    raise
+                except Exception as e:
+                    logger.error(f"【{self.cookie_id}】消息监控循环失败: {self._safe_str(e)}")
+                    # 出错后也等待5分钟再重试
+                    try:
+                        await self._interruptible_sleep(self.message_monitor_interval)
+                    except asyncio.CancelledError:
+                        logger.info(f"【{self.cookie_id}】消息监控循环在重试等待时收到取消信号，准备退出")
+                        raise
+        except asyncio.CancelledError:
+            # 确保CancelledError被正确传播
+            logger.info(f"【{self.cookie_id}】消息监控循环已取消")
+            raise
+        finally:
+            # 确保任务能正常结束
+            logger.info(f"【{self.cookie_id}】消息监控循环已退出")
+
+    async def _send_message_monitor_notification(self, message: str):
+        """发送消息监控通知（带冷却期）"""
+        current_time = time.time()
+        time_since_last_notification = current_time - self.last_message_monitor_notification_time
+        
+        # 检查冷却期
+        if time_since_last_notification < self.message_monitor_notification_cooldown:
+            remaining_minutes = int((self.message_monitor_notification_cooldown - time_since_last_notification) // 60)
+            logger.info(f"【{self.cookie_id}】消息监控通知仍在冷却期内，还需等待 {remaining_minutes} 分钟")
+            return
+
+        # 发送通知
+        logger.warning(f"【{self.cookie_id}】⚠️ {message}")
+        await self.send_token_refresh_notification(
+            f"【消息接收监控】{message}，请检查WebSocket连接是否正常",
+            "message_monitor"
+        )
+        
+        # 更新通知时间
+        self.last_message_monitor_notification_time = current_time
+
+    async def _send_heartbeat_missing_notification(self, missing_duration: float):
+        """发送心跳任务缺失通知（带冷却期）"""
+        current_time = time.time()
+        time_since_last_notification = current_time - self.last_heartbeat_missing_notification_time
+        
+        if time_since_last_notification < self.heartbeat_missing_notification_cooldown:
+            remaining_minutes = int((self.heartbeat_missing_notification_cooldown - time_since_last_notification) // 60)
+            logger.info(f"【{self.cookie_id}】心跳缺失通知仍在冷却期内，还需等待 {remaining_minutes} 分钟")
+            return
+        
+        hours = int(missing_duration // 3600)
+        minutes = int((missing_duration % 3600) // 60)
+        message = f"心跳任务已缺失 {hours} 小时 {minutes} 分钟，请手动使用密码登录以恢复心跳"
+        logger.warning(f"【{self.cookie_id}】⚠️ {message}")
+        await self.send_token_refresh_notification(
+            f"【心跳监控】{message}",
+            "heartbeat_missing"
+        )
+        self.last_heartbeat_missing_notification_time = current_time
+
+    def _format_time(self, timestamp: float) -> str:
+        """格式化时间戳为可读字符串"""
+        if timestamp == 0:
+            return "从未"
+        from datetime import datetime
+        return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+
     async def _execute_cookie_refresh(self, current_time):
         """独立执行Cookie刷新任务，避免阻塞主循环"""
 
@@ -7693,6 +7884,13 @@ class XianyuLive:
                             else:
                                 logger.info(f"【{self.cookie_id}】Cookie刷新任务已在运行，跳过启动")
 
+                            if not self.message_monitor_task or self.message_monitor_task.done():
+                                logger.info(f"【{self.cookie_id}】启动消息接收监控任务...")
+                                self.message_monitor_task = asyncio.create_task(self.message_monitor_loop())
+                                tasks_started.append("消息监控")
+                            else:
+                                logger.info(f"【{self.cookie_id}】消息接收监控任务已在运行，跳过启动")
+
                             # 记录所有后台任务状态
                             if tasks_started:
                                 logger.info(f"【{self.cookie_id}】✅ 新启动的任务: {', '.join(tasks_started)}")
@@ -7776,6 +7974,15 @@ class XianyuLive:
 
                     # 检查是否超过最大失败次数
                     if self.connection_failures >= self.max_connection_failures:
+                        # 如果正在执行密码登录，跳过本次触发（避免重复触发）
+                        if XianyuLive._password_login_in_progress.get(self.cookie_id, False):
+                            logger.info(f"【{self.cookie_id}】检测到密码登录正在进行中，跳过本次触发（等待密码登录完成）")
+                            # 重置失败计数，避免重复触发
+                            self.connection_failures = 0
+                            # 等待一段时间后继续重连
+                            await asyncio.sleep(10)
+                            continue
+                        
                         self._set_connection_state(ConnectionState.FAILED, f"连续失败{self.max_connection_failures}次")
                         logger.warning(f"【{self.cookie_id}】连续失败{self.max_connection_failures}次，尝试通过密码登录刷新Cookie...")
                         
