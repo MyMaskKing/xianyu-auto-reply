@@ -3014,6 +3014,8 @@ class XianyuSliderStealth:
                             break
             
             # 启动浏览器
+            # 注意：即使在线程池中运行，Playwright的同步API仍可能检测到主线程的事件循环
+            # 这需要在调用方使用ThreadPoolExecutor或threading.Thread来完全隔离
             playwright = sync_playwright().start()
             context = playwright.chromium.launch_persistent_context(
                 user_data_dir,

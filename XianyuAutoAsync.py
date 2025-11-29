@@ -2175,19 +2175,24 @@ class XianyuLive:
                     verification_url=verification_url
                 )
             
-            # 在单独的线程中运行同步的登录方法
+            # 在单独的线程中运行同步的登录方法（使用ThreadPoolExecutor避免Playwright检测到asyncio循环）
             import asyncio
+            import concurrent.futures
             from utils.xianyu_slider_stealth import NetworkErrorException
             
             slider = XianyuSliderStealth(user_id=self.cookie_id, enable_learning=False, headless=not show_browser)
             try:
-                result = await asyncio.to_thread(
-                    slider.login_with_password_playwright,
-                    account=username,
-                    password=password,
-                    show_browser=show_browser,
-                    notification_callback=notification_callback_wrapper
-                )
+                # 使用ThreadPoolExecutor而不是asyncio.to_thread，确保Playwright不会检测到asyncio循环
+                loop = asyncio.get_event_loop()
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    result = await loop.run_in_executor(
+                        executor,
+                        slider.login_with_password_playwright,
+                        username,
+                        password,
+                        show_browser,
+                        notification_callback_wrapper
+                    )
             except NetworkErrorException as network_err:
                 # 网络错误，等待3小时后再重试
                 network_wait_hours = 3
