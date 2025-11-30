@@ -50,7 +50,7 @@ LOG_CONFIG:
   compression: zip
   format: '<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level>
     | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>'
-  level: INFO
+  level: DEBUG
   retention: 7 days
   rotation: "00:00"  # 每天0点轮转（而不是从程序启动时间开始计算24小时）
 MANUAL_MODE:
