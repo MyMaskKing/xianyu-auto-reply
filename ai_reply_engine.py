@@ -221,13 +221,40 @@ class AIReplyEngine:
 
     def _call_openai_api(self, client: OpenAI, settings: dict, messages: list, max_tokens: int = 100, temperature: float = 0.7) -> str:
         """调用OpenAI兼容API"""
-        response = client.chat.completions.create(
-            model=settings['model_name'],
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=temperature
-        )
-        return response.choices[0].message.content.strip()
+        try:
+            response = client.chat.completions.create(
+                model=settings['model_name'],
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature
+            )
+            
+            # 检查响应类型
+            if isinstance(response, str):
+                logger.error(f"API返回了字符串而不是对象: {response[:200]}")
+                raise Exception(f"API返回格式错误: 期望对象，但收到字符串 - {response[:200]}")
+            
+            # 检查响应对象是否有choices属性
+            if not hasattr(response, 'choices') or not response.choices:
+                logger.error(f"API响应缺少choices属性或choices为空: {type(response)}, {response}")
+                raise Exception(f"API响应格式错误: 缺少choices属性或choices为空")
+            
+            # 提取回复内容
+            content = response.choices[0].message.content
+            if not content:
+                logger.error(f"API响应中content为空: {response}")
+                raise Exception("API响应中content为空")
+            
+            return content.strip()
+            
+        except Exception as e:
+            # 记录详细的错误信息
+            logger.error(f"调用OpenAI API失败: {type(e).__name__}: {e}")
+            if hasattr(e, 'response'):
+                logger.error(f"错误响应: {e.response}")
+            if hasattr(e, 'status_code'):
+                logger.error(f"HTTP状态码: {e.status_code}")
+            raise
 
     def is_ai_enabled(self, cookie_id: str) -> bool:
         """检查指定账号是否启用AI回复"""
