@@ -1394,7 +1394,21 @@ class XianyuLive:
 
             # 获取token
             token = None
-            token = trans_cookies(self.cookies_str).get('_m_h5_tk', '').split('_')[0] if trans_cookies(self.cookies_str).get('_m_h5_tk') else ''
+            cookies_dict = trans_cookies(self.cookies_str)
+            _m_h5_tk = cookies_dict.get('_m_h5_tk', '')
+            
+            if not _m_h5_tk:
+                error_msg = f"【{self.cookie_id}】Cookie中缺少_m_h5_tk字段，无法生成签名。请检查Cookie是否完整。"
+                logger.error(error_msg)
+                logger.error(f"【{self.cookie_id}】当前Cookie字段: {list(cookies_dict.keys())}")
+                logger.error(f"【{self.cookie_id}】Cookie字符串长度: {len(self.cookies_str)}")
+                raise Exception(f"Cookie中缺少_m_h5_tk字段，无法刷新Token。可能是扫码登录的Cookie不完整，请尝试使用密码登录或重新扫码登录。")
+            
+            token = _m_h5_tk.split('_')[0] if '_' in _m_h5_tk else _m_h5_tk
+            if not token:
+                error_msg = f"【{self.cookie_id}】_m_h5_tk字段格式不正确: {_m_h5_tk}"
+                logger.error(error_msg)
+                raise Exception(f"_m_h5_tk字段格式不正确，无法刷新Token。请尝试重新登录。")
 
             sign = generate_sign(params['t'], token, data_val)
             params['sign'] = sign
